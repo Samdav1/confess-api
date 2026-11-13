@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
+from sqlalchemy import Column, DateTime
 from sqlmodel import SQLModel, Field, Relationship
 
 class Payment(SQLModel, table=True):
@@ -12,10 +13,15 @@ class Payment(SQLModel, table=True):
     currency: str = Field(default="NGN")
     status: str = Field(default="pending", index=True)
     channel: Optional[str] = Field(default=None)
-    paid_at: Optional[datetime] = Field(default=None)
+    paid_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+        default_factory=lambda: datetime.now(timezone.utc)
     )
     updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+        default_factory=lambda: datetime.now(timezone.utc)
     )

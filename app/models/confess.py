@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional, List
 from uuid import UUID, uuid4
+from sqlalchemy import Column, DateTime
 from sqlmodel import SQLModel, Field, Relationship
 
 class AnonymousLink(SQLModel, table=True):
@@ -14,9 +15,12 @@ class AnonymousLink(SQLModel, table=True):
     emoji: str = Field(default="❤️")
     is_active: bool = Field(default=True)
     is_extended: bool = Field(default=False)
-    expires_at: datetime = Field(nullable=False)
+    expires_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+        default_factory=lambda: datetime.now(timezone.utc)
     )
 
     messages: List["AnonymousMessage"] = Relationship(back_populates="link")
@@ -42,7 +46,8 @@ class AnonymousMessage(SQLModel, table=True):
     is_sender_clue_unlocked: bool = Field(default=False)
 
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+        default_factory=lambda: datetime.now(timezone.utc)
     )
 
     link: Optional[AnonymousLink] = Relationship(back_populates="messages")

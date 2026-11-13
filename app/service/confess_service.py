@@ -24,7 +24,7 @@ class ConfessService:
             if not existing.first():
                 break
 
-        expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=24)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
 
         link = AnonymousLink(
             user_id=user_id,
@@ -49,7 +49,7 @@ class ConfessService:
             return None
 
         # Check expiry
-        if link.expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
+        if link.expires_at < datetime.now(timezone.utc):
             link.is_active = False
             session.add(link)
             await session.commit()
@@ -68,7 +68,7 @@ class ConfessService:
         # Extend by 24 hours
         link.expires_at += timedelta(hours=24)
         link.is_extended = True
-        if not link.is_active and link.expires_at > datetime.now(timezone.utc).replace(tzinfo=None):
+        if not link.is_active and link.expires_at > datetime.now(timezone.utc):
             link.is_active = True
 
         session.add(link)
