@@ -24,10 +24,12 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Set the sqlalchemy.url from settings
-# Strip +asyncpg if present as Alembic's sync engine doesn't like it
+# Convert asyncpg URL to psycopg2 sync URL if needed
 db_url = settings.DATABASE_URL
 if "+asyncpg" in db_url:
-    db_url = db_url.replace("+asyncpg", "")
+    db_url = db_url.replace("+asyncpg", "+psycopg2")
+elif db_url.startswith("postgresql://"):
+    db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
 config.set_main_option("sqlalchemy.url", db_url)
 
 # add your model's MetaData object here

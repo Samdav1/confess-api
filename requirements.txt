@@ -20,7 +20,9 @@ httpx
 google-genai
 groq
 gunicorn
+greenlet
 psycopg2-binary
+psycopg[binary]
 cachetools
 google-auth
 
