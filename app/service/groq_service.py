@@ -1,9 +1,20 @@
-from groq import AsyncGroq
+from groq import AsyncGroq, NotFoundError
 from fastapi import HTTPException, status
 import logging
 import asyncio
+import os
 
 logger = logging.getLogger(__name__)
+
+# List of models to try in priority order
+FALLBACK_MODELS = [
+    os.getenv("GROQ_MODEL", "").strip(),
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+]
+FALLBACK_MODELS = [m for m in FALLBACK_MODELS if m]
 
 class GroqService:
     def __init__(self, api_key: str):
@@ -13,8 +24,7 @@ class GroqService:
             return
 
         self.client = AsyncGroq(api_key=api_key)
-        # Using Llama 3.3 70B for high quality generation
-        self.model_name = 'llama-3.3-70b-versatile'
+        self.model_name = FALLBACK_MODELS[0] if FALLBACK_MODELS else "openai/gpt-oss-120b"
 
     async def generate_confession_message(
         self,
@@ -67,12 +77,18 @@ class GroqService:
 
         max_retries = 3
         retry_delay = 1  # Start with 1 second delay
+        models_to_try = [m for m in FALLBACK_MODELS]
+        if self.model_name not in models_to_try:
+            models_to_try.insert(0, self.model_name)
+        current_model_idx = 0
 
         for attempt in range(max_retries):
             try:
                 if not self.client:
                      logger.error("Groq Client is None. API Key likely missing.")
                      raise ValueError("Groq API Key is missing.")
+
+                model = models_to_try[current_model_idx] if current_model_idx < len(models_to_try) else self.model_name
 
                 response = await self.client.chat.completions.create(
                     messages=[
@@ -81,7 +97,7 @@ class GroqService:
                             "content": prompt
                         }
                     ],
-                    model=self.model_name,
+                    model=model,
                     temperature=0.3,
                     max_tokens=2000,
                 )
@@ -89,11 +105,27 @@ class GroqService:
                 content = response.choices[0].message.content
 
                 if content:
+                    self.model_name = model
                     return content.strip()
                 else:
                     logger.warning("Empty response from Groq API")
                     raise ValueError("Empty response from API")
 
+            except NotFoundError as e:
+                logger.warning(f"Groq model {models_to_try[current_model_idx]} not found / not accessible: {e}")
+                # Switch to next available fallback model immediately
+                if current_model_idx + 1 < len(models_to_try):
+                    current_model_idx += 1
+                    self.model_name = models_to_try[current_model_idx]
+                    logger.info(f"Switching Groq model to fallback: {self.model_name}")
+                    continue
+                else:
+                    logger.exception(f"Attempt {attempt + 1}/{max_retries} failed to generate Groq content")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        break
             except Exception as e:
                 logger.exception(f"Attempt {attempt + 1}/{max_retries} failed to generate Groq content")
                 error_msg = str(e)
@@ -112,9 +144,11 @@ class GroqService:
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
                 else:
-                    logger.error(f"All {max_retries} attempts to generate content failed.")
-                    return (
-                        f"Sometimes words fail to capture what's in the heart, but my feelings are real. "
-                        f"I wanted to share this confession with you, {recipient_name or 'Friend'}, "
-                        f"to let you know how much you mean to me and that I'm thinking of you sincerely."
-                    )
+                    break
+
+        logger.error(f"All {max_retries} attempts to generate content failed.")
+        return (
+            f"Sometimes words fail to capture what's in the heart, but my feelings are real. "
+            f"I wanted to share this confession with you, {recipient_name or 'Friend'}, "
+            f"to let you know how much you mean to me and that I'm thinking of you sincerely."
+        )
