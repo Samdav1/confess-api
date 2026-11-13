@@ -1,0 +1,132 @@
+import uvicorn
+from fastapi import FastAPI, Depends
+from fastapi.staticfiles import StaticFiles
+from contextlib import asynccontextmanager
+from app.db.sessions import init_db
+from app.config.settings import settings
+import app.models
+from app.config.api_key import get_api_key
+from app.api.v1 import router as api_router
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+
+
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    :param app:
+    """
+    await init_db()
+    yield
+
+
+
+limiter = Limiter(key_func=get_remote_address)
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+)
+app.state.limiter = limiter
+app.add_exception_handler(429, _rate_limit_exceeded_handler)
+
+# Security Middlewares
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=settings.ALLOWED_HOSTS
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_middleware(SlowAPIMiddleware)
+
+# app.mount("/static", StaticFiles(directory="uploaded_files"), name="static")
+
+
+from app.api.v1.auth import router as auth_router
+from app.api.v1.admin import router as admin_router
+from app.api.v1.admin_posts import router as admin_posts_router
+from app.api.v1.admin_campaigns import router as admin_campaigns_router
+from app.api.v1.admin_email_templates import router as admin_email_templates_router
+from app.api.v1.posts import router as public_posts_router
+from app.api.feedback import feedback_router
+
+# Auth endpoints MUST be public so Swagger can get a token
+app.include_router(auth_router, prefix=f"{settings.API_V1_STR}/auth", tags=["auth"])
+app.include_router(public_posts_router, prefix=f"{settings.API_V1_STR}/posts", tags=["posts"])
+app.include_router(admin_router, prefix=f"{settings.API_V1_STR}/admin", tags=["admin"])
+app.include_router(admin_posts_router, prefix=f"{settings.API_V1_STR}/admin/posts", tags=["admin-posts"])
+app.include_router(admin_campaigns_router, prefix=f"{settings.API_V1_STR}/admin/campaigns", tags=["admin-campaigns"])
+app.include_router(admin_email_templates_router, prefix=f"{settings.API_V1_STR}/admin/email-templates", tags=["admin-email-templates"])
+app.include_router(feedback_router, prefix=f"{settings.API_V1_STR}/feedback", tags=["feedback"])
+# All other API endpoints require the X-API-KEY
+app.include_router(api_router, prefix=settings.API_V1_STR, dependencies=[Depends(get_api_key)])
+
+
+import os
+
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "service": settings.PROJECT_NAME}
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
+
+
+
+from fastapi.openapi.utils import get_openapi
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title=settings.PROJECT_NAME,
+        version="1.0.0",
+        description="Confess API",
+        routes=app.routes,
+    )
+    openapi_schema["components"]["securitySchemes"] = {
+        "OAuth2PasswordBearer": {
+            "type": "oauth2",
+            "flows": {
+                "password": {
+                    "scopes": {},
+                    "tokenUrl": f"{settings.API_V1_STR}/auth/token"
+                }
+            }
+        },
+        "APIKeyHeader": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-KEY"
+        }
+    }
+
+    # Remove global security to allow per-route security (public vs protected) to work
+    if "security" in openapi_schema:
+        del openapi_schema["security"]
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi

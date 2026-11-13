@@ -1,0 +1,14 @@
+{% extends "email_base.html" %}
+
+{% block content %}
+<p>Hello <strong>{{ name }}</strong>,</p>
+
+<p>You have received a new confession from <strong>{{ sender_name }}</strong>.</p>
+
+
+<div class="confession-card">
+    "{{ message }}"
+</div>
+
+<p>To view more details or reply, click the button below:</p>
+{% endblock %}

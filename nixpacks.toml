@@ -1,0 +1,8 @@
+[providers]
+python = "3.11"
+
+[phases.setup]
+nixPkgs = ["python311", "gcc", "postgresql"]
+
+[start]
+cmd = "./entrypoint.sh"
