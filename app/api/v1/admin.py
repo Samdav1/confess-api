@@ -12,6 +12,7 @@ from app.schemas.admin import (
     AdminPasswordReset,
     AdminLoginResponse,
     DashboardStatsResponse,
+    FinancialAnalysisResponse,
     PaginatedUsersResponse,
     PaginatedConfessFormsResponse,
     PaginatedAnonymousLinksResponse,
@@ -22,6 +23,7 @@ from app.service.admin import (
     login_admin,
     reset_admin_password,
     get_dashboard_metrics,
+    get_financial_analysis_admin,
     get_all_users_admin,
     get_all_confess_forms_admin,
     get_all_anonymous_links_admin,
@@ -77,6 +79,18 @@ async def dashboard_stats(
     """
     metrics = await get_dashboard_metrics(db=db)
     return DashboardStatsResponse(**metrics)
+
+@router.get("/financial-analysis", response_model=FinancialAnalysisResponse, summary="[Admin] Get Comprehensive Financial Analysis")
+async def financial_analysis(
+    current_admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_session)
+):
+    """
+    Get full financial analytics: total orders, successful and pending transactions,
+    revenue breakdown by service, success rates, averages, and recent transaction data.
+    """
+    data = await get_financial_analysis_admin(db=db)
+    return FinancialAnalysisResponse(**data)
 
 @router.get("/users", response_model=PaginatedUsersResponse, summary="[Admin] Get paginated users")
 async def get_users(

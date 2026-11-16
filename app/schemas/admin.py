@@ -44,6 +44,39 @@ class DashboardStatsResponse(BaseModel):
     total_anonymous_links: int
     total_messages: int
 
+class ServiceFinancialBreakdown(BaseModel):
+    service_name: str
+    total_revenue: float
+    successful_count: int
+    pending_count: int
+    failed_count: int
+    total_orders: int
+
+class RecentTransactionSummary(BaseModel):
+    id: UUID
+    reference: str
+    amount: float
+    currency: str
+    status: str
+    channel: Optional[str] = None
+    created_at: datetime
+    paid_at: Optional[datetime] = None
+
+class FinancialAnalysisResponse(BaseModel):
+    currency: str
+    total_revenue: float
+    total_orders: int
+    successful_transactions: int
+    pending_transactions: int
+    failed_transactions: int
+    abandoned_transactions: int
+    success_rate_percentage: float
+    average_order_value: float
+    revenue_today: float
+    revenue_this_month: float
+    services_breakdown: List[ServiceFinancialBreakdown]
+    recent_transactions: List[RecentTransactionSummary]
+
 class PaginatedUsersResponse(BaseModel):
     total: int
     items: List[UserResponse]
