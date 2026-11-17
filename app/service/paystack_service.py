@@ -4,6 +4,7 @@ import json
 import httpx
 from datetime import datetime, timezone
 from typing import Optional, List
+from uuid import UUID
 from fastapi import HTTPException, status, BackgroundTasks
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -157,6 +158,7 @@ class PaystackService:
                             celebration.payment_status = PaymentStatus.PAID
                             session.add(celebration)
 
+                await self._sync_redemption_status(session, "success", reference, metadata)
                 await session.commit()
                 await session.refresh(payment)
 
@@ -170,6 +172,10 @@ class PaystackService:
                         from app.service.celebration_service import CelebrationService
                         cel_service = CelebrationService(session)
                         background_tasks.add_task(cel_service.send_celebration_notification, celebration_to_notify, background_tasks)
+
+        if paystack_status in ("failed", "abandoned", "reversed"):
+            await self._sync_redemption_status(session, paystack_status, reference, data.get("metadata"))
+            await session.commit()
 
         PENDING_STATUSES = {"pending", "ongoing", "processing", "queued"}
 
@@ -290,6 +296,7 @@ class PaystackService:
                             celebration.payment_status = PaymentStatus.PAID
                             session.add(celebration)
 
+                await self._sync_redemption_status(session, "success", reference, metadata)
                 await session.commit()
 
                 if background_tasks:
@@ -303,7 +310,75 @@ class PaystackService:
                         cel_service = CelebrationService(session)
                         background_tasks.add_task(cel_service.send_celebration_notification, celebration_to_notify, background_tasks)
 
+        elif event.get("event") in ("charge.failed", "charge.abandoned"):
+            data = event.get("data", {})
+            reference = data.get("reference")
+            if reference:
+                await self._sync_redemption_status(session, "failed", reference, data.get("metadata"))
+                await session.commit()
+
+        elif event.get("event") == "refund.processed":
+            data = event.get("data", {})
+            reference = data.get("transaction_reference") or data.get("reference")
+            if reference:
+                await self._sync_redemption_status(session, "reversed", reference, data.get("metadata"))
+                await session.commit()
+
         return {"status": "success"}
+
+    async def _sync_redemption_status(
+        self,
+        session: AsyncSession,
+        paystack_status: str,
+        reference: str,
+        metadata: Optional[object] = None,
+    ) -> None:
+        """Synchronize reserved/used Little Perk redemption state with payment outcome."""
+        from app.models.listening_room import PerkRedemption
+        from app.service.listening_room_service import listening_room_service
+
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+
+        redemption = None
+        redemption_id_str = metadata.get("redemption_id")
+        if redemption_id_str:
+            try:
+                redemption = await session.get(PerkRedemption, UUID(str(redemption_id_str)))
+            except Exception:
+                redemption = None
+
+        if not redemption and reference:
+            stmt = select(PerkRedemption).where(PerkRedemption.payment_reference == reference)
+            redemption = (await session.execute(stmt)).scalar_one_or_none()
+
+        if not redemption:
+            return
+
+        if paystack_status == "success":
+            await listening_room_service.consume_redemption(
+                session=session,
+                redemption_id=redemption.id,
+                payment_reference=reference,
+                auto_commit=False,
+            )
+        elif paystack_status in ("failed", "abandoned"):
+            if redemption.status == "reserved":
+                await listening_room_service.release_redemption(
+                    session=session,
+                    redemption_id=redemption.id,
+                    auto_commit=False,
+                )
+        elif paystack_status == "reversed":
+            await listening_room_service.refund_redemption_on_payment_reversal(
+                session=session,
+                redemption_id=redemption.id,
+                auto_commit=False,
+            )
 
 
 paystack_service = PaystackService()

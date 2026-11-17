@@ -43,3 +43,50 @@ async def init_db():
                     END LOOP;
                 END $$;
             """))
+
+    await _seed_listening_room_defaults()
+
+
+async def _seed_listening_room_defaults():
+    from sqlalchemy import select, func
+    from app.models.listening_room import DiscountType, KindnessPointsPolicy, LittlePerk
+
+    async with AsyncSession(engine) as session:
+        policy = (
+            await session.execute(select(KindnessPointsPolicy).where(KindnessPointsPolicy.id == 1))
+        ).scalar_one_or_none()
+        if not policy:
+            session.add(KindnessPointsPolicy(id=1))
+
+        perk_count = (await session.execute(select(func.count(LittlePerk.id)))).scalar() or 0
+        if perk_count == 0:
+            session.add(
+                LittlePerk(
+                    name="10% Off Celebration Page",
+                    description="Redeem 100 Kindness Points for 10% off any Confess Celebration page (up to ₦500).",
+                    points_cost=100,
+                    discount_type=DiscountType.PERCENTAGE.value,
+                    discount_value=10.0,
+                    currency="NGN",
+                    eligible_celebration_types=[],
+                    minimum_order_amount=500.0,
+                    maximum_discount_amount=500.0,
+                    active=True,
+                )
+            )
+            session.add(
+                LittlePerk(
+                    name="₦500 Off Celebration Page",
+                    description="Redeem 250 Kindness Points for ₦500 off a Celebration page of ₦1,000 or more.",
+                    points_cost=250,
+                    discount_type=DiscountType.FIXED_AMOUNT.value,
+                    discount_value=500.0,
+                    currency="NGN",
+                    eligible_celebration_types=[],
+                    minimum_order_amount=1000.0,
+                    maximum_discount_amount=500.0,
+                    active=True,
+                )
+            )
+
+        await session.commit()

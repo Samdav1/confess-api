@@ -8,6 +8,7 @@ class PaystackInitializeRequest(BaseModel):
     amount: float
     callback_url: Optional[str] = None
     metadata: Optional[dict] = None
+    redemption_code: Optional[str] = None
 
 class PaystackInitializeResponse(BaseModel):
     authorization_url: str

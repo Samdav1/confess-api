@@ -181,7 +181,15 @@ class CelebrationService:
         skip = (page - 1) * page_size
         return await self.repository.get_by_user_id(user_id, skip, page_size)
 
-    async def initialize_payment(self, celebration_id: UUID, user_id: UUID, amount, email: str, callback_url: Optional[str] = None):
+    async def initialize_payment(
+        self,
+        celebration_id: UUID,
+        user_id: UUID,
+        amount,
+        email: str,
+        callback_url: Optional[str] = None,
+        redemption_code: Optional[str] = None,
+    ):
         celebration = await self.repository.get_by_id(celebration_id)
         if not celebration:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Celebration page not found")
@@ -192,11 +200,59 @@ class CelebrationService:
         if celebration.payment_status == PaymentStatus.PAID:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Already paid")
 
-        return await paystack_service.initialize_transaction(
+        from sqlalchemy import select
+        from app.models.listening_room import PerkRedemption, RedemptionStatus
+        from app.service.listening_room_service import listening_room_service
+
+        payable_amount = float(celebration.total_price) if celebration.total_price else float(amount)
+        additional_metadata = {}
+        reserved_redemption = None
+
+        if redemption_code:
+            applied = await listening_room_service.apply_redemption_at_checkout(
+                session=self.session,
+                user_id=user_id,
+                code=redemption_code,
+                celebration_id=celebration_id,
+                auto_commit=False,
+            )
+            payable_amount = float(applied["final_amount"])
+            additional_metadata["redemption_id"] = str(applied["redemption_id"])
+            reserved_redemption = await self.session.get(PerkRedemption, applied["redemption_id"])
+        else:
+            existing_reserved = (
+                await self.session.execute(
+                    select(PerkRedemption).where(
+                        PerkRedemption.celebration_id == celebration_id,
+                        PerkRedemption.user_id == user_id,
+                        PerkRedemption.status == RedemptionStatus.RESERVED.value,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_reserved:
+                payable_amount = float(existing_reserved.final_order_amount if existing_reserved.final_order_amount is not None else payable_amount)
+                additional_metadata["redemption_id"] = str(existing_reserved.id)
+                reserved_redemption = existing_reserved
+
+        if payable_amount <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Payable amount after discount must be greater than zero for gateway checkout.",
+            )
+
+        init_resp = await paystack_service.initialize_transaction(
             session=self.session,
             user_id=str(user_id),
             email=email,
-            amount=amount,
+            amount=payable_amount,
             callback_url=callback_url,
-            celebration_id=str(celebration_id)
+            celebration_id=str(celebration_id),
+            additional_metadata=additional_metadata or None,
         )
+
+        if reserved_redemption:
+            reserved_redemption.payment_reference = init_resp.reference
+            self.session.add(reserved_redemption)
+            await self.session.commit()
+
+        return init_resp

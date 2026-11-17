@@ -10,3 +10,15 @@ from .celebration import CelebrationPage
 from .post import Post
 from .campaign import EmailCampaign
 from .email_template import AdminEmailTemplate
+from .listening_room import (
+    Thought,
+    GentleWord,
+    ThoughtAcknowledgement,
+    KindnessPointsPolicy,
+    UserKindnessBalance,
+    KindnessPointsLedger,
+    LittlePerk,
+    PerkRedemption,
+    ContentReport,
+    ModerationAuditLog,
+)

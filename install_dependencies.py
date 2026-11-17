@@ -5,6 +5,7 @@ packages = [
     "fastapi",
     "uvicorn[standard]",
     "sqlmodel",
+    "greenlet",
     "alembic",
     "pydantic-settings",
     "python-multipart",

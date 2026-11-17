@@ -135,3 +135,8 @@ async def get_anonymous_messages(
     """Get all anonymous messages."""
     data = await get_all_anonymous_messages_admin(db=db, skip=skip, limit=limit)
     return data
+
+
+from app.api.v1.admin_care_desk import router as care_desk_router
+
+router.include_router(care_desk_router, tags=["Care Desk"])

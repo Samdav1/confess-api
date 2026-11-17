@@ -60,7 +60,8 @@ async def initialize_payment(
         user_id=current_user.id,
         email=request.email,
         callback_url=request.callback_url,
-        amount=request.amount
+        amount=request.amount,
+        redemption_code=request.redemption_code,
     )
 
 @router.get("", response_model=CelebrationPageListResponse)

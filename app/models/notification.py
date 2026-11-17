@@ -11,6 +11,14 @@ class NotificationType(str, Enum):
     PAYMENT = "payment"
     SYSTEM = "system"
     CONFESS_FORM = "confess_form"
+    THOUGHT_PUBLISHED = "thought_published"
+    GENTLE_WORD_APPROVED = "gentle_word_approved"
+    GENTLE_WORD_REJECTED = "gentle_word_rejected"
+    GENTLE_WORD_RECEIVED = "gentle_word_received"
+    POINTS_AWARDED = "points_awarded"
+    PERK_REDEEMED = "perk_redeemed"
+    REDEMPTION_EXPIRING = "redemption_expiring"
+    CONTENT_HIDDEN = "content_hidden"
 
 
 class Notification(SQLModel, table=True):
