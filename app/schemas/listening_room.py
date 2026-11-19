@@ -115,6 +115,7 @@ class PublicThoughtItem(CamelModel):
     tone: str = ThoughtTone.CREAM.value
     status: str = ThoughtStatus.PUBLISHED.value
     created_at: datetime = Field(alias="createdAt")
+    approved_at: Optional[datetime] = Field(default=None, alias="approvedAt")
     published_at: Optional[datetime] = Field(default=None, alias="publishedAt")
     likes_count: int = Field(default=0, alias="likesCount")
     gentle_words_count: int = Field(default=0, alias="gentleWordsCount")
@@ -147,6 +148,7 @@ class OwnThoughtItem(CamelModel):
     likes_count: int = Field(default=0, alias="likesCount")
     gentle_words_count: int = Field(default=0, alias="gentleWordsCount")
     created_at: datetime = Field(alias="createdAt")
+    approved_at: Optional[datetime] = Field(default=None, alias="approvedAt")
     published_at: Optional[datetime] = Field(default=None, alias="publishedAt")
     support_resources: Optional[Dict[str, Any]] = Field(default=None, alias="supportResources")
 
@@ -412,6 +414,7 @@ class AdminThoughtQueueItem(CamelModel):
     moderated_by: Optional[UUID] = Field(default=None, alias="moderatedBy")
     moderated_at: Optional[datetime] = Field(default=None, alias="moderatedAt")
     created_at: datetime = Field(alias="createdAt")
+    approved_at: Optional[datetime] = Field(default=None, alias="approvedAt")
     published_at: Optional[datetime] = Field(default=None, alias="publishedAt")
 
     @model_validator(mode="after")

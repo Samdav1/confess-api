@@ -40,14 +40,14 @@ class NotificationRepository:
         if is_read is not None:
             statement = statement.where(Notification.is_read == is_read)
 
-        # Count total
-        count_stmt = select(Notification).where(Notification.user_id == user_id)
+        # Count total using SQL COUNT()
+        count_stmt = select(func.count(Notification.id)).where(Notification.user_id == user_id)
         if notification_type:
             count_stmt = count_stmt.where(Notification.type == notification_type)
         if is_read is not None:
             count_stmt = count_stmt.where(Notification.is_read == is_read)
         count_result = await self.session.exec(count_stmt)
-        total = len(count_result.all())
+        total = int(count_result.one() or 0)
 
         # Paginated results
         statement = statement.order_by(Notification.created_at.desc()).offset(skip).limit(limit)
@@ -56,12 +56,12 @@ class NotificationRepository:
 
     async def get_unread_count(self, user_id: UUID) -> int:
         """Get the number of unread notifications for a user."""
-        statement = select(Notification).where(
+        statement = select(func.count(Notification.id)).where(
             Notification.user_id == user_id,
             Notification.is_read == False,
         )
         result = await self.session.exec(statement)
-        return len(result.all())
+        return int(result.one() or 0)
 
     async def mark_as_read(self, notification_id: UUID) -> Optional[Notification]:
         """Mark a single notification as read."""

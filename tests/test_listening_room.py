@@ -3,7 +3,8 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
@@ -24,6 +25,7 @@ from app.models.listening_room import (
     ThoughtTone,
     UserKindnessBalance,
 )
+from app.models.notification import Notification, NotificationType
 from app.models.user import User
 from app.schemas.listening_room import (
     GentleWordCreateRequest,
@@ -41,6 +43,7 @@ from app.service.listening_room_service import (
     _encode_cursor,
     _sanitize_text,
 )
+from app.service.notification_dispatcher import notification_dispatcher
 
 
 def test_privacy_safe_serialization():
@@ -330,5 +333,90 @@ async def test_listening_room_end_to_end_workflow():
         assert refunded.status == RedemptionStatus.REFUNDED.value
         pts_refunded = await svc.get_my_kindness_points(session, helper.id)
         assert pts_refunded["balance"] == 50
+
+        # 7. Latest-approved feed ordering & background in-app notifications
+        bg_tasks = BackgroundTasks()
+        t_first = await svc.create_thought(
+            session=session,
+            user_id=author.id,
+            body="First created thought waiting for approval.",
+            category=ThoughtCategory.PERSONAL.value,
+            background_tasks=bg_tasks,
+        )
+        t_second = await svc.create_thought(
+            session=session,
+            user_id=author.id,
+            body="Second created thought waiting for approval.",
+            category=ThoughtCategory.PERSONAL.value,
+            background_tasks=bg_tasks,
+        )
+        t_rejected = await svc.create_thought(
+            session=session,
+            user_id=author.id,
+            body="Third thought that will be rejected by Care Desk.",
+            category=ThoughtCategory.PERSONAL.value,
+            background_tasks=bg_tasks,
+        )
+
+        # Approve t_second BEFORE t_first
+        await svc.approve_thought(session, admin.id, t_second["id"], background_tasks=bg_tasks)
+        await asyncio.sleep(0.01)
+        await svc.approve_thought(session, admin.id, t_first["id"], background_tasks=bg_tasks)
+        await svc.reject_thought(session, admin.id, t_rejected["id"], reason="Needs revision", background_tasks=bg_tasks)
+
+        ordered_feed, _ = await svc.list_published_thoughts(session, limit=10)
+        assert ordered_feed[0]["id"] == t_first["id"]
+        assert ordered_feed[1]["id"] == t_second["id"]
+
+        # Submit two comments: one approved, one rejected
+        gw_ok = await svc.submit_gentle_word(
+            session=session,
+            user_id=helper.id,
+            thought_id=t_first["id"],
+            body="Sending you lots of patience and kindness today.",
+            background_tasks=bg_tasks,
+        )
+        gw_rej = await svc.submit_gentle_word(
+            session=session,
+            user_id=helper.id,
+            thought_id=t_first["id"],
+            body="This comment will not pass moderation guidelines.",
+            background_tasks=bg_tasks,
+        )
+
+        await svc.approve_gentle_word(session, admin.id, gw_ok["id"], background_tasks=bg_tasks)
+        await svc.reject_gentle_word(session, admin.id, gw_rej["id"], reason="Off-topic", background_tasks=bg_tasks)
+
+        # Execute queued background notification batches using test session factory
+        dispatched_total = 0
+        for task in bg_tasks.tasks:
+            dispatched_total += await notification_dispatcher.dispatch_batch(
+                task.args[0],
+                session_factory=async_session,
+            )
+        assert dispatched_total > 0
+
+        author_notifs = (
+            await session.execute(select(Notification).where(Notification.user_id == author.id))
+        ).scalars().all()
+        helper_notifs = (
+            await session.execute(select(Notification).where(Notification.user_id == helper.id))
+        ).scalars().all()
+
+        author_types = [n.type for n in author_notifs]
+        helper_types = [n.type for n in helper_notifs]
+
+        # Thought author receives status notifications & ONLY approved comment notification
+        assert NotificationType.THOUGHT_SUBMITTED.value in author_types
+        assert NotificationType.THOUGHT_PUBLISHED.value in author_types
+        assert NotificationType.THOUGHT_REJECTED.value in author_types
+        assert NotificationType.GENTLE_WORD_RECEIVED.value in author_types
+        assert NotificationType.GENTLE_WORD_REJECTED.value not in author_types
+        assert NotificationType.GENTLE_WORD_SUBMITTED.value not in author_types
+
+        # Commenter receives submitted, approved, and rejected status notifications
+        assert NotificationType.GENTLE_WORD_SUBMITTED.value in helper_types
+        assert NotificationType.GENTLE_WORD_APPROVED.value in helper_types
+        assert NotificationType.GENTLE_WORD_REJECTED.value in helper_types
 
     await engine.dispose()

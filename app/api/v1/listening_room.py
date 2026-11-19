@@ -1,7 +1,7 @@
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db.sessions import get_session
@@ -90,6 +90,7 @@ async def list_thoughts(
 )
 async def create_thought(
     request: ThoughtCreateRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
@@ -100,6 +101,7 @@ async def create_thought(
         category=request.category.value if request.category else None,
         author_label=request.author_label or "A quiet heart",
         tone=request.tone.value if request.tone else "cream",
+        background_tasks=background_tasks,
     )
     return DataResponse(data=OwnThoughtItem(**thought))
 
@@ -212,6 +214,7 @@ async def list_thought_gentle_words(
 async def submit_gentle_word(
     thought_id: UUID,
     request: GentleWordCreateRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
@@ -222,6 +225,7 @@ async def submit_gentle_word(
         body=request.body,
         idempotency_key=request.idempotency_key,
         author_label=request.author_label or "A kind stranger",
+        background_tasks=background_tasks,
     )
     return DataResponse(data=GentleWordCreateItem(**gw))
 
@@ -381,6 +385,7 @@ async def list_little_perks(
 async def redeem_little_perk(
     perk_id: UUID,
     request: RedeemPerkRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
@@ -389,6 +394,7 @@ async def redeem_little_perk(
         user_id=current_user.id,
         perk_id=perk_id,
         idempotency_key=request.idempotency_key,
+        background_tasks=background_tasks,
     )
     return DataResponse(data=PerkRedemptionItem(**redemption))
 

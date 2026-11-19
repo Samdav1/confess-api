@@ -53,6 +53,9 @@ async def init_db():
             await conn.execute(text("ALTER TABLE listening_room_gentle_words ADD COLUMN IF NOT EXISTS author_label VARCHAR NOT NULL DEFAULT 'A kind stranger';"))
             await conn.execute(text("ALTER TABLE listening_room_gentle_words ADD COLUMN IF NOT EXISTS content_hash VARCHAR;"))
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lr_gw_content_hash ON listening_room_gentle_words (content_hash);"))
+            await conn.execute(text("ALTER TABLE listening_room_thoughts ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP WITH TIME ZONE;"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lr_thoughts_status_approved ON listening_room_thoughts (status, approved_at, id);"))
+            await conn.execute(text("UPDATE listening_room_thoughts SET approved_at = COALESCE(moderated_at, published_at, created_at) WHERE status = 'published' AND approved_at IS NULL;"))
 
     await _seed_listening_room_defaults()
 

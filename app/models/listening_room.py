@@ -113,6 +113,7 @@ class ReportStatus(str, Enum):
 class Thought(SQLModel, table=True):
     __tablename__ = "listening_room_thoughts"
     __table_args__ = (
+        Index("ix_lr_thoughts_status_approved", "status", "approved_at", "id"),
         Index("ix_lr_thoughts_status_published", "status", "published_at", "id"),
         Index("ix_lr_thoughts_status_created", "status", "created_at"),
         Index("ix_lr_thoughts_cat_status_created", "category", "status", "created_at"),
@@ -147,6 +148,10 @@ class Thought(SQLModel, table=True):
     updated_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False),
         default_factory=lambda: datetime.now(timezone.utc),
+    )
+    approved_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
     )
     published_at: Optional[datetime] = Field(
         default=None,

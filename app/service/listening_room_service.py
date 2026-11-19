@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from cachetools import TTLCache
-from fastapi import HTTPException, status
+from fastapi import BackgroundTasks, HTTPException, status
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,8 +39,11 @@ from app.models.listening_room import (
     ThoughtTone,
     UserKindnessBalance,
 )
-from app.models.notification import NotificationType
-from app.service.notification_service import notification_service
+from app.service.notification_dispatcher import (
+    ListeningRoomNotifications,
+    NotificationEvent,
+    notification_dispatcher,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,31 +276,6 @@ class ListeningRoomService:
         session.add(log)
         return log
 
-    async def _send_notification_safe(
-        self,
-        session: AsyncSession,
-        user_id: UUID,
-        notification_type: str,
-        title: str,
-        content: str,
-        reference_id: Optional[UUID] = None,
-        reference_type: Optional[str] = None,
-        metadata: Optional[dict] = None,
-    ) -> None:
-        try:
-            await notification_service.create_notification(
-                session=session,
-                user_id=user_id,
-                notification_type=notification_type,
-                title=title,
-                content=content,
-                reference_id=reference_id,
-                reference_type=reference_type,
-                metadata=metadata,
-            )
-        except Exception as e:
-            logger.error("Failed to create Listening Room notification (%s): %s", notification_type, e)
-
     # =========================================================================
     # MEMBER: THOUGHTS & LISTENING ROOM FEED
     # =========================================================================
@@ -310,6 +288,7 @@ class ListeningRoomService:
         category: Optional[str] = None,
         author_label: str = "A quiet heart",
         tone: str = ThoughtTone.CREAM.value,
+        background_tasks: Optional[BackgroundTasks] = None,
     ) -> Dict[str, Any]:
         await self._check_posting_allowed(session, user_id)
         _check_rate_limit(_THOUGHT_RATE_CACHE, user_id, limit=5, action_label="sharing Thoughts")
@@ -347,10 +326,12 @@ class ListeningRoomService:
         if policy.require_thought_moderation or urgent_flagged:
             t_status = ThoughtStatus.PENDING.value
             m_status = ModerationStatus.PENDING.value
+            approved_at = None
             published_at = None
         else:
             t_status = ThoughtStatus.PUBLISHED.value
             m_status = ModerationStatus.APPROVED.value
+            approved_at = now
             published_at = now
 
         thought = Thought(
@@ -365,11 +346,23 @@ class ListeningRoomService:
             is_urgent_flagged=urgent_flagged,
             created_at=now,
             updated_at=now,
+            approved_at=approved_at,
             published_at=published_at,
         )
         session.add(thought)
         await session.commit()
         await session.refresh(thought)
+
+        if t_status == ThoughtStatus.PENDING.value:
+            notification_dispatcher.enqueue(
+                background_tasks,
+                [ListeningRoomNotifications.thought_submitted(user_id, thought.id)],
+            )
+        else:
+            notification_dispatcher.enqueue(
+                background_tasks,
+                [ListeningRoomNotifications.thought_published(user_id, thought.id)],
+            )
 
         return {
             "id": thought.id,
@@ -383,6 +376,7 @@ class ListeningRoomService:
             "likes_count": thought.likes_count,
             "gentle_words_count": thought.gentle_words_count,
             "created_at": thought.created_at,
+            "approved_at": thought.approved_at,
             "published_at": thought.published_at,
             "support_resources": CRISIS_SUPPORT_RESOURCES if urgent_flagged else None,
         }
@@ -452,10 +446,10 @@ class ListeningRoomService:
         page_size: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
         eff_limit = page_size or limit
+        sort_ts = func.coalesce(Thought.approved_at, Thought.published_at, Thought.created_at)
         base_filters = [
             Thought.status == ThoughtStatus.PUBLISHED.value,
             Thought.deleted_at.is_(None),
-            Thought.published_at.isnot(None),
         ]
         if category:
             base_filters.append(Thought.category == category)
@@ -467,19 +461,26 @@ class ListeningRoomService:
             cursor_ts, cursor_id = _decode_cursor(cursor)
             stmt = stmt.where(
                 or_(
-                    Thought.published_at < cursor_ts,
-                    and_(Thought.published_at == cursor_ts, Thought.id < cursor_id),
+                    sort_ts < cursor_ts,
+                    and_(sort_ts == cursor_ts, Thought.id < cursor_id),
                 )
             )
         elif page is not None and page > 1:
             stmt = stmt.offset((page - 1) * eff_limit)
 
-        stmt = stmt.order_by(Thought.published_at.desc(), Thought.id.desc()).limit(eff_limit + 1)
+        stmt = stmt.order_by(sort_ts.desc(), Thought.id.desc()).limit(eff_limit + 1)
         rows = (await session.execute(stmt)).scalars().all()
 
         has_more = len(rows) > eff_limit
         items = rows[:eff_limit]
-        next_cursor = _encode_cursor(items[-1].published_at, items[-1].id) if has_more and items else None
+        next_cursor = (
+            _encode_cursor(
+                items[-1].approved_at or items[-1].published_at or items[-1].created_at,
+                items[-1].id,
+            )
+            if has_more and items
+            else None
+        )
 
         thought_ids = [t.id for t in items]
         ack_types_map, ack_counts_map, user_acks_map = await self._fetch_acknowledgement_details(
@@ -497,6 +498,7 @@ class ListeningRoomService:
                 "tone": t.tone,
                 "status": t.status,
                 "created_at": t.created_at,
+                "approved_at": t.approved_at,
                 "published_at": t.published_at,
                 "likes_count": t.likes_count,
                 "gentle_words_count": t.gentle_words_count,
@@ -568,6 +570,7 @@ class ListeningRoomService:
             "tone": thought.tone,
             "status": thought.status,
             "created_at": thought.created_at,
+            "approved_at": thought.approved_at,
             "published_at": thought.published_at,
             "likes_count": thought.likes_count,
             "gentle_words_count": thought.gentle_words_count,
@@ -677,6 +680,7 @@ class ListeningRoomService:
                 "likes_count": t.likes_count,
                 "gentle_words_count": t.gentle_words_count,
                 "created_at": t.created_at,
+                "approved_at": t.approved_at,
                 "published_at": t.published_at,
                 "support_resources": CRISIS_SUPPORT_RESOURCES if t.is_urgent_flagged else None,
             }
@@ -843,6 +847,7 @@ class ListeningRoomService:
         body: str,
         idempotency_key: Optional[str] = None,
         author_label: str = "A kind stranger",
+        background_tasks: Optional[BackgroundTasks] = None,
     ) -> Dict[str, Any]:
         await self._check_posting_allowed(session, user_id)
 
@@ -923,6 +928,12 @@ class ListeningRoomService:
         session.add(gw)
         await session.commit()
         await session.refresh(gw)
+
+        # Notify only the commenter that their submission is queued for moderation
+        notification_dispatcher.enqueue(
+            background_tasks,
+            [ListeningRoomNotifications.gentle_word_submitted(user_id, gw.id, thought_id)],
+        )
 
         return {
             "id": gw.id,
@@ -1129,6 +1140,7 @@ class ListeningRoomService:
         user_id: UUID,
         perk_id: UUID,
         idempotency_key: str,
+        background_tasks: Optional[BackgroundTasks] = None,
     ) -> Dict[str, Any]:
         # Fast-path idempotency check
         existing = (
@@ -1225,21 +1237,13 @@ class ListeningRoomService:
         perk.updated_at = now
         session.add(redemption)
         session.add(perk)
-        await session.flush()
-
-        await self._send_notification_safe(
-            session=session,
-            user_id=user_id,
-            notification_type=NotificationType.PERK_REDEEMED.value,
-            title="Your Little Perk is ready to use",
-            content=f"You redeemed '{perk.name}'. Apply it when paying for an eligible celebration.",
-            reference_id=redemption.id,
-            reference_type="perk_redemption",
-            metadata={"perk_id": str(perk.id)},
-        )
-
         await session.commit()
         await session.refresh(redemption)
+
+        notification_dispatcher.enqueue(
+            background_tasks,
+            [ListeningRoomNotifications.perk_redeemed(user_id, redemption.id, perk.id, perk.name)],
+        )
         return self._serialize_redemption(redemption, perk.name)
 
     def _serialize_redemption(self, r: PerkRedemption, perk_name: Optional[str] = None) -> Dict[str, Any]:
@@ -1623,6 +1627,7 @@ class ListeningRoomService:
         admin_id: UUID,
         thought_id: UUID,
         note: Optional[str] = None,
+        background_tasks: Optional[BackgroundTasks] = None,
     ) -> Thought:
         thought = (
             await session.execute(select(Thought).where(Thought.id == thought_id).with_for_update())
@@ -1645,6 +1650,7 @@ class ListeningRoomService:
         thought.moderation_status = ModerationStatus.APPROVED.value
         thought.moderated_by = admin_id
         thought.moderated_at = now
+        thought.approved_at = now
         if note is not None:
             thought.moderation_note = note
         if not thought.published_at:
@@ -1663,19 +1669,15 @@ class ListeningRoomService:
             reason=note,
         )
 
-        if prev_status == ThoughtStatus.PENDING.value:
-            await self._send_notification_safe(
-                session=session,
-                user_id=thought.author_user_id,
-                notification_type=NotificationType.THOUGHT_PUBLISHED.value,
-                title="Your Thought is now in The Listening Room",
-                content="Your Thought has been reviewed and shared anonymously in The Listening Room.",
-                reference_id=thought.id,
-                reference_type="thought",
-            )
-
         await session.commit()
         await session.refresh(thought)
+
+        if prev_status == ThoughtStatus.PENDING.value:
+            notification_dispatcher.enqueue(
+                background_tasks,
+                [ListeningRoomNotifications.thought_published(thought.author_user_id, thought.id)],
+            )
+
         return thought
 
     async def reject_thought(
@@ -1685,6 +1687,7 @@ class ListeningRoomService:
         thought_id: UUID,
         reason: Optional[str] = None,
         note: Optional[str] = None,
+        background_tasks: Optional[BackgroundTasks] = None,
     ) -> Thought:
         thought = (
             await session.execute(select(Thought).where(Thought.id == thought_id).with_for_update())
@@ -1723,6 +1726,11 @@ class ListeningRoomService:
         )
         await session.commit()
         await session.refresh(thought)
+
+        notification_dispatcher.enqueue(
+            background_tasks,
+            [ListeningRoomNotifications.thought_rejected(thought.author_user_id, thought.id)],
+        )
         return thought
 
     async def _calculate_award_points_with_caps(
@@ -1770,6 +1778,7 @@ class ListeningRoomService:
         admin_id: UUID,
         gentle_word_id: UUID,
         note: Optional[str] = None,
+        background_tasks: Optional[BackgroundTasks] = None,
     ) -> GentleWord:
         gw = (
             await session.execute(select(GentleWord).where(GentleWord.id == gentle_word_id).with_for_update())
@@ -1837,37 +1846,22 @@ class ListeningRoomService:
             metadata={"points_awarded": awarded_pts},
         )
 
-        # Contributor notification
-        contrib_msg = (
-            f"Your Gentle Word has been shared. You earned {awarded_pts} Kindness Points."
-            if awarded_pts > 0
-            else "Your Gentle Word has been shared in The Listening Room."
-        )
-        await self._send_notification_safe(
-            session=session,
-            user_id=gw.author_user_id,
-            notification_type=NotificationType.GENTLE_WORD_APPROVED.value,
-            title="Your Gentle Word was approved",
-            content=contrib_msg,
-            reference_id=gw.id,
-            reference_type="gentle_word",
-            metadata={"thought_id": str(thought.id), "points_awarded": awarded_pts},
-        )
-
-        # Thought author notification (privacy-safe: never exposes contributor identity)
-        if not is_self_reply:
-            await self._send_notification_safe(
-                session=session,
-                user_id=thought.author_user_id,
-                notification_type=NotificationType.GENTLE_WORD_RECEIVED.value,
-                title="Someone left a Gentle Word for your Thought",
-                content="Someone left a Gentle Word for your Thought in The Listening Room.",
-                reference_id=thought.id,
-                reference_type="thought",
-            )
-
         await session.commit()
         await session.refresh(gw)
+
+        events: List[NotificationEvent] = [
+            ListeningRoomNotifications.gentle_word_approved(
+                gw.author_user_id, gw.id, thought.id, awarded_pts
+            )
+        ]
+        # Notify Thought author ONLY for newly approved comments (never exposing contributor identity)
+        if not is_self_reply:
+            events.append(
+                ListeningRoomNotifications.gentle_word_received(
+                    thought.author_user_id, thought.id, gw.id
+                )
+            )
+        notification_dispatcher.enqueue(background_tasks, events)
         return gw
 
     async def reject_gentle_word(
@@ -1877,6 +1871,7 @@ class ListeningRoomService:
         gentle_word_id: UUID,
         reason: Optional[str] = None,
         note: Optional[str] = None,
+        background_tasks: Optional[BackgroundTasks] = None,
     ) -> GentleWord:
         gw = (
             await session.execute(select(GentleWord).where(GentleWord.id == gentle_word_id).with_for_update())
@@ -1914,18 +1909,14 @@ class ListeningRoomService:
             reason=reason or note,
         )
 
-        await self._send_notification_safe(
-            session=session,
-            user_id=gw.author_user_id,
-            notification_type=NotificationType.GENTLE_WORD_REJECTED.value,
-            title="Update on your Gentle Word",
-            content="Your Gentle Word wasn't approved this time. You can review the community guidelines and try again.",
-            reference_id=gw.id,
-            reference_type="gentle_word",
-        )
-
         await session.commit()
         await session.refresh(gw)
+
+        # Rejected comments are notified ONLY to the commenter, never the Thought author
+        notification_dispatcher.enqueue(
+            background_tasks,
+            [ListeningRoomNotifications.gentle_word_rejected(gw.author_user_id, gw.id, gw.thought_id)],
+        )
         return gw
 
     async def hide_content(
@@ -1937,8 +1928,11 @@ class ListeningRoomService:
         reason: str,
         reverse_points: bool = False,
         auto_commit: bool = True,
+        background_tasks: Optional[BackgroundTasks] = None,
+        pending_events: Optional[List[NotificationEvent]] = None,
     ) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
+        local_events: List[NotificationEvent] = []
 
         if target_type == ReportTargetType.THOUGHT:
             thought = (
@@ -1966,18 +1960,17 @@ class ListeningRoomService:
                     new_status=thought.status,
                     reason=reason,
                 )
-                await self._send_notification_safe(
-                    session=session,
-                    user_id=thought.author_user_id,
-                    notification_type=NotificationType.CONTENT_HIDDEN.value,
-                    title="Your Thought was hidden",
-                    content="One of your Thoughts in The Listening Room was hidden following moderation review.",
-                    reference_id=thought.id,
-                    reference_type="thought",
+                local_events.append(
+                    ListeningRoomNotifications.content_hidden(
+                        thought.author_user_id, "thought", thought.id
+                    )
                 )
 
+            if pending_events is not None:
+                pending_events.extend(local_events)
             if auto_commit:
                 await session.commit()
+                notification_dispatcher.enqueue(background_tasks, local_events)
             return {"target_type": "thought", "target_id": thought.id, "status": thought.status}
 
         # Gentle Word hide
@@ -2033,18 +2026,17 @@ class ListeningRoomService:
                 reason=reason,
                 metadata={"points_reversed": reversed_pts},
             )
-            await self._send_notification_safe(
-                session=session,
-                user_id=gw.author_user_id,
-                notification_type=NotificationType.CONTENT_HIDDEN.value,
-                title="Your Gentle Word was hidden",
-                content="One of your Gentle Words was hidden following moderation review.",
-                reference_id=gw.id,
-                reference_type="gentle_word",
+            local_events.append(
+                ListeningRoomNotifications.content_hidden(
+                    gw.author_user_id, "gentle_word", gw.id
+                )
             )
 
+        if pending_events is not None:
+            pending_events.extend(local_events)
         if auto_commit:
             await session.commit()
+            notification_dispatcher.enqueue(background_tasks, local_events)
         return {"target_type": "gentle_word", "target_id": gw.id, "status": gw.status}
 
     async def list_reports(
@@ -2112,6 +2104,7 @@ class ListeningRoomService:
         note: Optional[str] = None,
         hide_target_content: bool = False,
         reverse_points: bool = False,
+        background_tasks: Optional[BackgroundTasks] = None,
     ) -> ContentReport:
         report = (
             await session.execute(select(ContentReport).where(ContentReport.id == report_id).with_for_update())
@@ -2127,6 +2120,7 @@ class ListeningRoomService:
         report.resolution_note = note
         session.add(report)
 
+        collected_events: List[NotificationEvent] = []
         if hide_target_content:
             target_enum = ReportTargetType(report.target_type)
             await self.hide_content(
@@ -2137,6 +2131,7 @@ class ListeningRoomService:
                 reason=note or f"Actioned via report {report.id}",
                 reverse_points=reverse_points,
                 auto_commit=False,
+                pending_events=collected_events,
             )
 
         await self._write_audit_log(
@@ -2152,6 +2147,8 @@ class ListeningRoomService:
         )
         await session.commit()
         await session.refresh(report)
+
+        notification_dispatcher.enqueue(background_tasks, collected_events)
         return report
 
     async def set_user_posting_restriction(

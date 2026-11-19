@@ -1,7 +1,7 @@
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Query
 from sqlalchemy import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -105,6 +105,7 @@ async def list_care_desk_gentle_words(
 )
 async def approve_thought(
     thought_id: UUID,
+    background_tasks: BackgroundTasks,
     request: Optional[ModerationDecisionRequest] = Body(default=None),
     current_admin: Admin = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
@@ -114,6 +115,7 @@ async def approve_thought(
         admin_id=current_admin.id,
         thought_id=thought_id,
         note=request.note if request else None,
+        background_tasks=background_tasks,
     )
     return DataResponse(data=AdminThoughtQueueItem.model_validate(thought))
 
@@ -135,6 +137,7 @@ async def approve_thought(
 )
 async def reject_thought(
     thought_id: UUID,
+    background_tasks: BackgroundTasks,
     request: Optional[ModerationDecisionRequest] = Body(default=None),
     current_admin: Admin = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
@@ -145,6 +148,7 @@ async def reject_thought(
         thought_id=thought_id,
         reason=request.reason if request else None,
         note=request.note if request else None,
+        background_tasks=background_tasks,
     )
     return DataResponse(data=AdminThoughtQueueItem.model_validate(thought))
 
@@ -166,6 +170,7 @@ async def reject_thought(
 )
 async def approve_gentle_word(
     gentle_word_id: UUID,
+    background_tasks: BackgroundTasks,
     request: Optional[ModerationDecisionRequest] = Body(default=None),
     current_admin: Admin = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
@@ -175,6 +180,7 @@ async def approve_gentle_word(
         admin_id=current_admin.id,
         gentle_word_id=gentle_word_id,
         note=request.note if request else None,
+        background_tasks=background_tasks,
     )
     return DataResponse(data=AdminGentleWordQueueItem.model_validate(gw))
 
@@ -196,6 +202,7 @@ async def approve_gentle_word(
 )
 async def reject_gentle_word(
     gentle_word_id: UUID,
+    background_tasks: BackgroundTasks,
     request: Optional[ModerationDecisionRequest] = Body(default=None),
     current_admin: Admin = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
@@ -206,6 +213,7 @@ async def reject_gentle_word(
         gentle_word_id=gentle_word_id,
         reason=request.reason if request else None,
         note=request.note if request else None,
+        background_tasks=background_tasks,
     )
     return DataResponse(data=AdminGentleWordQueueItem.model_validate(gw))
 
@@ -219,6 +227,7 @@ async def hide_content(
     target_type: ReportTargetType,
     target_id: UUID,
     request: HideContentRequest,
+    background_tasks: BackgroundTasks,
     current_admin: Admin = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
 ):
@@ -229,6 +238,7 @@ async def hide_content(
         target_id=target_id,
         reason=request.reason,
         reverse_points=request.reverse_points,
+        background_tasks=background_tasks,
     )
     return DataResponse(data=res)
 
@@ -265,6 +275,7 @@ async def list_reports(
 async def resolve_report(
     report_id: UUID,
     request: ResolveReportRequest,
+    background_tasks: BackgroundTasks,
     current_admin: Admin = Depends(get_current_admin),
     db: AsyncSession = Depends(get_session),
 ):
@@ -276,6 +287,7 @@ async def resolve_report(
         note=request.note,
         hide_target_content=request.hide_target_content,
         reverse_points=request.reverse_points,
+        background_tasks=background_tasks,
     )
     return DataResponse(data=AdminReportItem.model_validate(report))
 
