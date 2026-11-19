@@ -8,6 +8,10 @@ from sqlmodel import SQLModel, Field
 
 
 class ThoughtCategory(str, Enum):
+    GENTLE_REMINDER = "gentle_reminder"
+    QUIET_CONFESSION = "quiet_confession"
+    LITTLE_JOYS = "little_joys"
+    LATE_NIGHT_THOUGHT = "late_night_thought"
     RELATIONSHIPS = "relationships"
     FAMILY = "family"
     WORK = "work"
@@ -18,11 +22,21 @@ class ThoughtCategory(str, Enum):
     OTHER = "other"
 
 
+class ThoughtTone(str, Enum):
+    PINK = "pink"
+    CREAM = "cream"
+    PEACH = "peach"
+    MAUVE = "mauve"
+    WINE = "wine"
+
+
 class ThoughtStatus(str, Enum):
     PENDING = "pending"
     PUBLISHED = "published"
     REJECTED = "rejected"
     HIDDEN = "hidden"
+    REMOVED = "removed"
+    FLAGGED = "flagged"
     DELETED = "deleted"
 
 
@@ -34,16 +48,20 @@ class ModerationStatus(str, Enum):
 
 class GentleWordStatus(str, Enum):
     PENDING = "pending"
+    PENDING_REVIEW = "pending_review"
     APPROVED = "approved"
     REJECTED = "rejected"
+    REMOVED = "removed"
     HIDDEN = "hidden"
     DELETED = "deleted"
 
 
 class AcknowledgementType(str, Enum):
+    I_HEAR_YOU = "i_hear_you"
+    SENDING_WARMTH = "sending_warmth"
+    YOU_ARE_NOT_ALONE = "you_are_not_alone"
     IM_LISTENING = "im_listening"
     YOURE_NOT_ALONE = "youre_not_alone"
-    SENDING_WARMTH = "sending_warmth"
     HOLDING_SPACE = "holding_space"
 
 
@@ -96,15 +114,20 @@ class Thought(SQLModel, table=True):
     __tablename__ = "listening_room_thoughts"
     __table_args__ = (
         Index("ix_lr_thoughts_status_published", "status", "published_at", "id"),
+        Index("ix_lr_thoughts_status_created", "status", "created_at"),
+        Index("ix_lr_thoughts_cat_status_created", "category", "status", "created_at"),
         Index("ix_lr_thoughts_author_created", "author_user_id", "created_at"),
     )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     author_user_id: UUID = Field(foreign_key="users.id", nullable=False, index=True)
+    author_label: str = Field(default="A quiet heart", nullable=False)
     body: str = Field(sa_column=Column(Text, nullable=False))
     category: Optional[str] = Field(default=None, nullable=True, index=True)
-    status: str = Field(default=ThoughtStatus.PENDING.value, nullable=False, index=True)
-    moderation_status: str = Field(default=ModerationStatus.PENDING.value, nullable=False, index=True)
+    tone: str = Field(default=ThoughtTone.CREAM.value, nullable=False)
+    content_hash: Optional[str] = Field(default=None, nullable=True, index=True)
+    status: str = Field(default=ThoughtStatus.PUBLISHED.value, nullable=False, index=True)
+    moderation_status: str = Field(default=ModerationStatus.APPROVED.value, nullable=False, index=True)
     moderated_by: Optional[UUID] = Field(default=None, foreign_key="admins.id", nullable=True)
     moderated_at: Optional[datetime] = Field(
         default=None,
@@ -114,6 +137,7 @@ class Thought(SQLModel, table=True):
         default=None,
         sa_column=Column(Text, nullable=True),
     )
+    likes_count: int = Field(default=0, nullable=False)
     gentle_words_count: int = Field(default=0, nullable=False)
     is_urgent_flagged: bool = Field(default=False, nullable=False, index=True)
     created_at: datetime = Field(
@@ -134,6 +158,21 @@ class Thought(SQLModel, table=True):
     )
 
 
+class ThoughtLike(SQLModel, table=True):
+    __tablename__ = "listening_room_thought_likes"
+    __table_args__ = (
+        UniqueConstraint("thought_id", "user_id", name="uq_lr_thought_like_thought_user"),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    thought_id: UUID = Field(foreign_key="listening_room_thoughts.id", nullable=False, index=True)
+    user_id: UUID = Field(foreign_key="users.id", nullable=False, index=True)
+    created_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
+
+
 class GentleWord(SQLModel, table=True):
     __tablename__ = "listening_room_gentle_words"
     __table_args__ = (
@@ -145,8 +184,10 @@ class GentleWord(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     thought_id: UUID = Field(foreign_key="listening_room_thoughts.id", nullable=False, index=True)
     author_user_id: UUID = Field(foreign_key="users.id", nullable=False, index=True)
+    author_label: str = Field(default="A kind stranger", nullable=False)
     body: str = Field(sa_column=Column(Text, nullable=False))
-    status: str = Field(default=GentleWordStatus.PENDING.value, nullable=False, index=True)
+    content_hash: Optional[str] = Field(default=None, nullable=True, index=True)
+    status: str = Field(default=GentleWordStatus.PENDING_REVIEW.value, nullable=False, index=True)
     moderated_by: Optional[UUID] = Field(default=None, foreign_key="admins.id", nullable=True)
     moderated_at: Optional[datetime] = Field(
         default=None,
@@ -200,7 +241,7 @@ class KindnessPointsPolicy(SQLModel, table=True):
     minimum_points_to_redeem: int = Field(default=100, nullable=False)
     daily_award_cap: int = Field(default=50, nullable=False)
     weekly_award_cap: int = Field(default=200, nullable=False)
-    require_thought_moderation: bool = Field(default=True, nullable=False)
+    require_thought_moderation: bool = Field(default=False, nullable=False)
     updated_by_admin_id: Optional[UUID] = Field(default=None, foreign_key="admins.id", nullable=True)
     updated_at: datetime = Field(
         sa_column=Column(DateTime(timezone=True), nullable=False),

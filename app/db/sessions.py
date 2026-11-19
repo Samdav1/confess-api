@@ -43,6 +43,16 @@ async def init_db():
                     END LOOP;
                 END $$;
             """))
+            await conn.execute(text("ALTER TABLE listening_room_thoughts ADD COLUMN IF NOT EXISTS author_label VARCHAR NOT NULL DEFAULT 'A quiet heart';"))
+            await conn.execute(text("ALTER TABLE listening_room_thoughts ADD COLUMN IF NOT EXISTS tone VARCHAR NOT NULL DEFAULT 'cream';"))
+            await conn.execute(text("ALTER TABLE listening_room_thoughts ADD COLUMN IF NOT EXISTS content_hash VARCHAR;"))
+            await conn.execute(text("ALTER TABLE listening_room_thoughts ADD COLUMN IF NOT EXISTS likes_count INTEGER NOT NULL DEFAULT 0;"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lr_thoughts_content_hash ON listening_room_thoughts (content_hash);"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lr_thoughts_status_created ON listening_room_thoughts (status, created_at);"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lr_thoughts_cat_status_created ON listening_room_thoughts (category, status, created_at);"))
+            await conn.execute(text("ALTER TABLE listening_room_gentle_words ADD COLUMN IF NOT EXISTS author_label VARCHAR NOT NULL DEFAULT 'A kind stranger';"))
+            await conn.execute(text("ALTER TABLE listening_room_gentle_words ADD COLUMN IF NOT EXISTS content_hash VARCHAR;"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lr_gw_content_hash ON listening_room_gentle_words (content_hash);"))
 
     await _seed_listening_room_defaults()
 

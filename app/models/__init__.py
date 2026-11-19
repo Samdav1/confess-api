@@ -12,6 +12,7 @@ from .campaign import EmailCampaign
 from .email_template import AdminEmailTemplate
 from .listening_room import (
     Thought,
+    ThoughtLike,
     GentleWord,
     ThoughtAcknowledgement,
     KindnessPointsPolicy,

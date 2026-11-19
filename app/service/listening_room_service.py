@@ -11,7 +11,7 @@ from uuid import UUID
 
 from cachetools import TTLCache
 from fastapi import HTTPException, status
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,7 +34,9 @@ from app.models.listening_room import (
     ReportTargetType,
     Thought,
     ThoughtAcknowledgement,
+    ThoughtLike,
     ThoughtStatus,
+    ThoughtTone,
     UserKindnessBalance,
 )
 from app.models.notification import NotificationType
@@ -79,6 +81,11 @@ def _sanitize_text(text: str) -> str:
 
 def _hash_code(code: str) -> str:
     return hashlib.sha256(code.strip().upper().encode("utf-8")).hexdigest()
+
+
+def _hash_content(text: str) -> str:
+    normalized = " ".join(text.strip().lower().split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _generate_redemption_code() -> str:
@@ -301,17 +308,38 @@ class ListeningRoomService:
         user_id: UUID,
         body: str,
         category: Optional[str] = None,
+        author_label: str = "A quiet heart",
+        tone: str = ThoughtTone.CREAM.value,
     ) -> Dict[str, Any]:
         await self._check_posting_allowed(session, user_id)
         _check_rate_limit(_THOUGHT_RATE_CACHE, user_id, limit=5, action_label="sharing Thoughts")
 
         cleaned_body = _sanitize_text(body)
-        if len(" ".join(cleaned_body.split())) < 10:
+        if len(" ".join(cleaned_body.split())) < 5:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Thought must contain at least 10 non-whitespace characters.",
+                detail="Thought must contain at least 5 non-whitespace characters.",
             )
 
+        content_hash = _hash_content(cleaned_body)
+        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        dup = (
+            await session.execute(
+                select(Thought.id).where(
+                    Thought.author_user_id == user_id,
+                    Thought.content_hash == content_hash,
+                    Thought.created_at >= one_hour_ago,
+                    Thought.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if dup:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You have already shared this Thought recently.",
+            )
+
+        safe_label = _sanitize_text(author_label or "A quiet heart") or "A quiet heart"
         policy = await self.get_or_create_policy(session)
         now = datetime.now(timezone.utc)
         urgent_flagged = bool(_CRISIS_PATTERNS.search(cleaned_body))
@@ -327,8 +355,11 @@ class ListeningRoomService:
 
         thought = Thought(
             author_user_id=user_id,
+            author_label=safe_label[:60],
             body=cleaned_body,
             category=category,
+            tone=tone or ThoughtTone.CREAM.value,
+            content_hash=content_hash,
             status=t_status,
             moderation_status=m_status,
             is_urgent_flagged=urgent_flagged,
@@ -342,47 +373,96 @@ class ListeningRoomService:
 
         return {
             "id": thought.id,
+            "author_label": thought.author_label,
             "body": thought.body,
+            "content": thought.body,
             "category": thought.category,
+            "tone": thought.tone,
             "status": thought.status,
             "moderation_status": thought.moderation_status,
+            "likes_count": thought.likes_count,
             "gentle_words_count": thought.gentle_words_count,
             "created_at": thought.created_at,
             "published_at": thought.published_at,
             "support_resources": CRISIS_SUPPORT_RESOURCES if urgent_flagged else None,
         }
 
-    async def _fetch_acknowledgements_map(
-        self, session: AsyncSession, thought_ids: List[UUID]
-    ) -> Dict[UUID, List[str]]:
-        if not thought_ids:
-            return {}
-        stmt = (
-            select(ThoughtAcknowledgement.thought_id, ThoughtAcknowledgement.acknowledgement_type)
-            .where(ThoughtAcknowledgement.thought_id.in_(thought_ids))
-            .distinct()
-        )
-        rows = (await session.execute(stmt)).all()
-        ack_map: Dict[UUID, List[str]] = {tid: [] for tid in thought_ids}
-        for tid, ack_type in rows:
-            ack_map.setdefault(tid, []).append(ack_type)
-        return ack_map
-
-    async def list_published_thoughts(
+    async def _fetch_acknowledgement_details(
         self,
         session: AsyncSession,
+        thought_ids: List[UUID],
+        user_id: Optional[UUID] = None,
+    ) -> Tuple[Dict[UUID, List[str]], Dict[UUID, Dict[str, int]], Dict[UUID, List[str]]]:
+        if not thought_ids:
+            return {}, {}, {}
+
+        count_stmt = (
+            select(
+                ThoughtAcknowledgement.thought_id,
+                ThoughtAcknowledgement.acknowledgement_type,
+                func.count(ThoughtAcknowledgement.id),
+            )
+            .where(ThoughtAcknowledgement.thought_id.in_(thought_ids))
+            .group_by(ThoughtAcknowledgement.thought_id, ThoughtAcknowledgement.acknowledgement_type)
+        )
+        count_rows = (await session.execute(count_stmt)).all()
+
+        ack_types_map: Dict[UUID, List[str]] = {tid: [] for tid in thought_ids}
+        ack_counts_map: Dict[UUID, Dict[str, int]] = {tid: {} for tid in thought_ids}
+        for tid, ack_type, cnt in count_rows:
+            ack_types_map.setdefault(tid, []).append(ack_type)
+            ack_counts_map.setdefault(tid, {})[ack_type] = int(cnt)
+
+        user_acks_map: Dict[UUID, List[str]] = {tid: [] for tid in thought_ids}
+        if user_id:
+            u_stmt = select(
+                ThoughtAcknowledgement.thought_id,
+                ThoughtAcknowledgement.acknowledgement_type,
+            ).where(
+                ThoughtAcknowledgement.thought_id.in_(thought_ids),
+                ThoughtAcknowledgement.user_id == user_id,
+            )
+            for tid, ack_type in (await session.execute(u_stmt)).all():
+                user_acks_map.setdefault(tid, []).append(ack_type)
+
+        return ack_types_map, ack_counts_map, user_acks_map
+
+    async def _fetch_liked_thought_ids(
+        self,
+        session: AsyncSession,
+        thought_ids: List[UUID],
+        user_id: Optional[UUID] = None,
+    ) -> set:
+        if not thought_ids or not user_id:
+            return set()
+        stmt = select(ThoughtLike.thought_id).where(
+            ThoughtLike.thought_id.in_(thought_ids),
+            ThoughtLike.user_id == user_id,
+        )
+        return set((await session.execute(stmt)).scalars().all())
+
+    async def list_published_thoughts_feed(
+        self,
+        session: AsyncSession,
+        user_id: Optional[UUID] = None,
         category: Optional[str] = None,
         cursor: Optional[str] = None,
         limit: int = 20,
-    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        stmt = select(Thought).where(
+        page: Optional[int] = None,
+        page_size: Optional[int] = None,
+    ) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
+        eff_limit = page_size or limit
+        base_filters = [
             Thought.status == ThoughtStatus.PUBLISHED.value,
             Thought.deleted_at.is_(None),
             Thought.published_at.isnot(None),
-        )
+        ]
         if category:
-            stmt = stmt.where(Thought.category == category)
+            base_filters.append(Thought.category == category)
 
+        total = (await session.execute(select(func.count(Thought.id)).where(*base_filters))).scalar() or 0
+
+        stmt = select(Thought).where(*base_filters)
         if cursor:
             cursor_ts, cursor_id = _decode_cursor(cursor)
             stmt = stmt.where(
@@ -391,31 +471,67 @@ class ListeningRoomService:
                     and_(Thought.published_at == cursor_ts, Thought.id < cursor_id),
                 )
             )
+        elif page is not None and page > 1:
+            stmt = stmt.offset((page - 1) * eff_limit)
 
-        stmt = stmt.order_by(Thought.published_at.desc(), Thought.id.desc()).limit(limit + 1)
+        stmt = stmt.order_by(Thought.published_at.desc(), Thought.id.desc()).limit(eff_limit + 1)
         rows = (await session.execute(stmt)).scalars().all()
 
-        has_more = len(rows) > limit
-        items = rows[:limit]
+        has_more = len(rows) > eff_limit
+        items = rows[:eff_limit]
         next_cursor = _encode_cursor(items[-1].published_at, items[-1].id) if has_more and items else None
 
-        ack_map = await self._fetch_acknowledgements_map(session, [t.id for t in items])
+        thought_ids = [t.id for t in items]
+        ack_types_map, ack_counts_map, user_acks_map = await self._fetch_acknowledgement_details(
+            session, thought_ids, user_id
+        )
+        liked_ids = await self._fetch_liked_thought_ids(session, thought_ids, user_id)
 
         serialized = [
             {
                 "id": t.id,
+                "author_label": t.author_label,
                 "body": t.body,
+                "content": t.body,
                 "category": t.category,
+                "tone": t.tone,
+                "status": t.status,
                 "created_at": t.created_at,
                 "published_at": t.published_at,
+                "likes_count": t.likes_count,
                 "gentle_words_count": t.gentle_words_count,
-                "acknowledgements": ack_map.get(t.id, []),
+                "is_liked": t.id in liked_ids,
+                "acknowledgements": ack_types_map.get(t.id, []),
+                "user_acknowledgements": user_acks_map.get(t.id, []),
+                "acknowledgements_count": ack_counts_map.get(t.id, {}),
             }
             for t in items
         ]
-        return serialized, next_cursor
+        return serialized, int(total), next_cursor
 
-    async def get_thought_detail(self, session: AsyncSession, thought_id: UUID) -> Dict[str, Any]:
+    async def list_published_thoughts(
+        self,
+        session: AsyncSession,
+        category: Optional[str] = None,
+        cursor: Optional[str] = None,
+        limit: int = 20,
+        user_id: Optional[UUID] = None,
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        items, _, next_cursor = await self.list_published_thoughts_feed(
+            session=session,
+            user_id=user_id,
+            category=category,
+            cursor=cursor,
+            limit=limit,
+        )
+        return items, next_cursor
+
+    async def get_thought_detail(
+        self,
+        session: AsyncSession,
+        thought_id: UUID,
+        user_id: Optional[UUID] = None,
+    ) -> Dict[str, Any]:
         stmt = select(Thought).where(
             Thought.id == thought_id,
             Thought.status == ThoughtStatus.PUBLISHED.value,
@@ -438,21 +554,34 @@ class ListeningRoomService:
             .order_by(GentleWord.approved_at.asc(), GentleWord.created_at.asc())
         )
         gentle_words = (await session.execute(gw_stmt)).scalars().all()
-        ack_map = await self._fetch_acknowledgements_map(session, [thought.id])
+        ack_types_map, ack_counts_map, user_acks_map = await self._fetch_acknowledgement_details(
+            session, [thought.id], user_id
+        )
+        liked_ids = await self._fetch_liked_thought_ids(session, [thought.id], user_id)
 
         return {
             "id": thought.id,
+            "author_label": thought.author_label,
             "body": thought.body,
+            "content": thought.body,
             "category": thought.category,
+            "tone": thought.tone,
+            "status": thought.status,
             "created_at": thought.created_at,
             "published_at": thought.published_at,
+            "likes_count": thought.likes_count,
             "gentle_words_count": thought.gentle_words_count,
-            "acknowledgements": ack_map.get(thought.id, []),
+            "is_liked": thought.id in liked_ids,
+            "acknowledgements": ack_types_map.get(thought.id, []),
+            "user_acknowledgements": user_acks_map.get(thought.id, []),
+            "acknowledgements_count": ack_counts_map.get(thought.id, {}),
             "gentle_words": [
                 {
                     "id": gw.id,
                     "thought_id": gw.thought_id,
+                    "author_label": gw.author_label,
                     "body": gw.body,
+                    "content": gw.body,
                     "created_at": gw.created_at,
                     "approved_at": gw.approved_at,
                 }
@@ -460,6 +589,53 @@ class ListeningRoomService:
             ],
             "support_resources": CRISIS_SUPPORT_RESOURCES if thought.is_urgent_flagged else None,
         }
+
+    async def list_approved_gentle_words(
+        self,
+        session: AsyncSession,
+        thought_id: UUID,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        thought = (
+            await session.execute(
+                select(Thought.id).where(
+                    Thought.id == thought_id,
+                    Thought.status == ThoughtStatus.PUBLISHED.value,
+                    Thought.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if not thought:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thought not found.")
+
+        filters = [
+            GentleWord.thought_id == thought_id,
+            GentleWord.status == GentleWordStatus.APPROVED.value,
+            GentleWord.deleted_at.is_(None),
+        ]
+        total = (await session.execute(select(func.count(GentleWord.id)).where(*filters))).scalar() or 0
+        stmt = (
+            select(GentleWord)
+            .where(*filters)
+            .order_by(GentleWord.approved_at.asc(), GentleWord.created_at.asc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        items = [
+            {
+                "id": gw.id,
+                "thought_id": gw.thought_id,
+                "author_label": gw.author_label,
+                "body": gw.body,
+                "content": gw.body,
+                "created_at": gw.created_at,
+                "approved_at": gw.approved_at,
+            }
+            for gw in rows
+        ]
+        return items, int(total)
 
     async def list_my_thoughts(
         self,
@@ -491,10 +667,14 @@ class ListeningRoomService:
         serialized = [
             {
                 "id": t.id,
+                "author_label": t.author_label,
                 "body": t.body,
+                "content": t.body,
                 "category": t.category,
+                "tone": t.tone,
                 "status": t.status,
                 "moderation_status": t.moderation_status,
+                "likes_count": t.likes_count,
                 "gentle_words_count": t.gentle_words_count,
                 "created_at": t.created_at,
                 "published_at": t.published_at,
@@ -520,7 +700,68 @@ class ListeningRoomService:
         await session.commit()
         return {"id": thought.id, "status": thought.status}
 
-    async def add_acknowledgement(
+    async def toggle_thought_like(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+        thought_id: UUID,
+    ) -> Dict[str, Any]:
+        thought = (
+            await session.execute(
+                select(Thought).where(
+                    Thought.id == thought_id,
+                    Thought.status == ThoughtStatus.PUBLISHED.value,
+                    Thought.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if not thought:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thought not found.")
+
+        existing = (
+            await session.execute(
+                select(ThoughtLike)
+                .where(ThoughtLike.thought_id == thought_id, ThoughtLike.user_id == user_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+
+        now = datetime.now(timezone.utc)
+        if existing:
+            await session.execute(
+                delete(ThoughtLike).where(ThoughtLike.id == existing.id)
+            )
+            await session.execute(
+                update(Thought)
+                .where(Thought.id == thought_id)
+                .values(
+                    likes_count=case((Thought.likes_count > 0, Thought.likes_count - 1), else_=0),
+                    updated_at=now,
+                )
+            )
+            liked = False
+        else:
+            like = ThoughtLike(thought_id=thought_id, user_id=user_id, created_at=now)
+            session.add(like)
+            try:
+                await session.flush()
+                await session.execute(
+                    update(Thought)
+                    .where(Thought.id == thought_id)
+                    .values(likes_count=Thought.likes_count + 1, updated_at=now)
+                )
+                liked = True
+            except IntegrityError:
+                await session.rollback()
+                liked = True
+
+        await session.commit()
+        updated_count = (
+            await session.execute(select(Thought.likes_count).where(Thought.id == thought_id))
+        ).scalar() or 0
+        return {"thought_id": thought_id, "liked": liked, "likes_count": int(updated_count)}
+
+    async def toggle_acknowledgement(
         self,
         session: AsyncSession,
         user_id: UUID,
@@ -549,7 +790,13 @@ class ListeningRoomService:
             )
         ).scalar_one_or_none()
 
-        if not existing:
+        if existing:
+            await session.execute(
+                delete(ThoughtAcknowledgement).where(ThoughtAcknowledgement.id == existing.id)
+            )
+            await session.commit()
+            toggled = False
+        else:
             ack = ThoughtAcknowledgement(
                 thought_id=thought_id,
                 user_id=user_id,
@@ -558,11 +805,31 @@ class ListeningRoomService:
             session.add(ack)
             try:
                 await session.commit()
+                toggled = True
             except IntegrityError:
                 await session.rollback()
+                toggled = True
 
-        ack_map = await self._fetch_acknowledgements_map(session, [thought_id])
-        return {"thought_id": thought_id, "acknowledgements": ack_map.get(thought_id, [])}
+        ack_types_map, ack_counts_map, user_acks_map = await self._fetch_acknowledgement_details(
+            session, [thought_id], user_id
+        )
+        return {
+            "thought_id": thought_id,
+            "type": ack_type.value,
+            "toggled": toggled,
+            "acknowledgements": ack_types_map.get(thought_id, []),
+            "user_acknowledgements": user_acks_map.get(thought_id, []),
+            "acknowledgements_count": ack_counts_map.get(thought_id, {}),
+        }
+
+    async def add_acknowledgement(
+        self,
+        session: AsyncSession,
+        user_id: UUID,
+        thought_id: UUID,
+        ack_type: AcknowledgementType,
+    ) -> Dict[str, Any]:
+        return await self.toggle_acknowledgement(session, user_id, thought_id, ack_type)
 
     # =========================================================================
     # MEMBER: GENTLE WORDS
@@ -575,6 +842,7 @@ class ListeningRoomService:
         thought_id: UUID,
         body: str,
         idempotency_key: Optional[str] = None,
+        author_label: str = "A kind stranger",
     ) -> Dict[str, Any]:
         await self._check_posting_allowed(session, user_id)
 
@@ -587,14 +855,16 @@ class ListeningRoomService:
                 return {
                     "id": existing.id,
                     "thought_id": existing.thought_id,
+                    "author_label": existing.author_label,
                     "body": existing.body,
+                    "content": existing.body,
                     "status": existing.status,
                     "created_at": existing.created_at,
                 }
         else:
             scoped_key = None
 
-        _check_rate_limit(_GENTLE_WORD_RATE_CACHE, user_id, limit=15, action_label="submitting Gentle Words")
+        _check_rate_limit(_GENTLE_WORD_RATE_CACHE, user_id, limit=10, action_label="submitting Gentle Words")
 
         thought = (
             await session.execute(
@@ -618,14 +888,15 @@ class ListeningRoomService:
                 detail="Gentle Word must contain at least 5 non-whitespace characters.",
             )
 
+        content_hash = _hash_content(cleaned_body)
         # Duplicate spam check within the last hour
         one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         dup = (
             await session.execute(
-                select(GentleWord).where(
+                select(GentleWord.id).where(
                     GentleWord.thought_id == thought_id,
                     GentleWord.author_user_id == user_id,
-                    GentleWord.body == cleaned_body,
+                    GentleWord.content_hash == content_hash,
                     GentleWord.created_at >= one_hour_ago,
                 )
             )
@@ -636,12 +907,15 @@ class ListeningRoomService:
                 detail="You have already submitted this Gentle Word recently.",
             )
 
+        safe_label = _sanitize_text(author_label or "A kind stranger") or "A kind stranger"
         now = datetime.now(timezone.utc)
         gw = GentleWord(
             thought_id=thought_id,
             author_user_id=user_id,
+            author_label=safe_label[:60],
             body=cleaned_body,
-            status=GentleWordStatus.PENDING.value,
+            content_hash=content_hash,
+            status=GentleWordStatus.PENDING_REVIEW.value,
             idempotency_key=scoped_key,
             created_at=now,
             updated_at=now,
@@ -653,7 +927,9 @@ class ListeningRoomService:
         return {
             "id": gw.id,
             "thought_id": gw.thought_id,
+            "author_label": gw.author_label,
             "body": gw.body,
+            "content": gw.body,
             "status": gw.status,
             "created_at": gw.created_at,
         }
@@ -689,7 +965,9 @@ class ListeningRoomService:
             {
                 "id": gw.id,
                 "thought_id": gw.thought_id,
+                "author_label": gw.author_label,
                 "body": gw.body,
+                "content": gw.body,
                 "status": gw.status,
                 "points_awarded": gw.points_awarded,
                 "created_at": gw.created_at,
@@ -1289,13 +1567,18 @@ class ListeningRoomService:
     async def list_care_desk_gentle_words(
         self,
         session: AsyncSession,
-        gw_status: Optional[str] = GentleWordStatus.PENDING.value,
+        gw_status: Optional[str] = GentleWordStatus.PENDING_REVIEW.value,
         skip: int = 0,
         limit: int = 50,
     ) -> Dict[str, Any]:
         filters = [GentleWord.deleted_at.is_(None)]
         if gw_status:
-            filters.append(GentleWord.status == gw_status)
+            if gw_status in (GentleWordStatus.PENDING.value, GentleWordStatus.PENDING_REVIEW.value):
+                filters.append(
+                    GentleWord.status.in_([GentleWordStatus.PENDING.value, GentleWordStatus.PENDING_REVIEW.value])
+                )
+            else:
+                filters.append(GentleWord.status == gw_status)
 
         total = (
             await session.execute(select(func.count(GentleWord.id)).where(*filters))
@@ -1316,12 +1599,17 @@ class ListeningRoomService:
                 "thought_id": gw.thought_id,
                 "thought_preview": (t_body[:160] + "...") if t_body and len(t_body) > 160 else t_body,
                 "author_user_id": gw.author_user_id,
+                "author_label": gw.author_label,
                 "body": gw.body,
+                "content": gw.body,
                 "status": gw.status,
                 "points_awarded": gw.points_awarded,
                 "moderation_note": gw.moderation_note,
+                "rejection_reason": gw.moderation_note if gw.status == GentleWordStatus.REJECTED.value else None,
                 "moderated_by": gw.moderated_by,
+                "reviewed_by": gw.moderated_by,
                 "moderated_at": gw.moderated_at,
+                "reviewed_at": gw.moderated_at,
                 "created_at": gw.created_at,
                 "approved_at": gw.approved_at,
             }
@@ -1493,7 +1781,7 @@ class ListeningRoomService:
         if gw.status == GentleWordStatus.APPROVED.value:
             return gw
 
-        if gw.status != GentleWordStatus.PENDING.value:
+        if gw.status not in (GentleWordStatus.PENDING.value, GentleWordStatus.PENDING_REVIEW.value):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot approve Gentle Word in status '{gw.status}'.",
@@ -1599,7 +1887,7 @@ class ListeningRoomService:
         if gw.status == GentleWordStatus.REJECTED.value:
             return gw
 
-        if gw.status != GentleWordStatus.PENDING.value:
+        if gw.status not in (GentleWordStatus.PENDING.value, GentleWordStatus.PENDING_REVIEW.value):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Approved Gentle Words cannot be rejected directly; hide content and reverse points if needed.",
@@ -2105,7 +2393,7 @@ class ListeningRoomService:
                     func.count(GentleWord.id).label("total"),
                     func.count(case((GentleWord.status == GentleWordStatus.APPROVED.value, GentleWord.id))).label("approved"),
                     func.count(case((GentleWord.status == GentleWordStatus.REJECTED.value, GentleWord.id))).label("rejected"),
-                    func.count(case((GentleWord.status == GentleWordStatus.PENDING.value, GentleWord.id))).label("pending"),
+                    func.count(case((GentleWord.status.in_([GentleWordStatus.PENDING.value, GentleWordStatus.PENDING_REVIEW.value]), GentleWord.id))).label("pending"),
                 ).where(GentleWord.deleted_at.is_(None))
             )
         ).first()

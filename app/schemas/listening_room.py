@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.listening_room import (
     AcknowledgementType,
@@ -16,6 +16,7 @@ from app.models.listening_room import (
     ReportTargetType,
     ThoughtCategory,
     ThoughtStatus,
+    ThoughtTone,
 )
 
 T = TypeVar("T")
@@ -33,17 +34,45 @@ class DataResponse(CamelModel, Generic[T]):
 
 
 class ThoughtCreateRequest(CamelModel):
-    body: str = Field(..., min_length=10, max_length=3000)
+    body: Optional[str] = Field(default=None, max_length=3000)
+    content: Optional[str] = Field(default=None, max_length=3000)
     category: Optional[ThoughtCategory] = None
+    author_label: Optional[str] = Field(default="A quiet heart", max_length=60, alias="authorLabel")
+    tone: Optional[ThoughtTone] = Field(default=ThoughtTone.CREAM)
     accept_guidelines: bool = Field(default=True, alias="acceptGuidelines")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_content_or_body(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            raw = values.get("body") if values.get("body") is not None else values.get("content")
+            if raw is not None:
+                values["body"] = raw
+                values["content"] = raw
+        return values
 
     @field_validator("body")
     @classmethod
-    def validate_non_empty_body(cls, v: str) -> str:
+    def validate_non_empty_body(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
         stripped = " ".join(v.strip().split())
-        if len(stripped) < 10:
-            raise ValueError("Thought must contain at least 10 non-whitespace characters.")
+        if len(stripped) < 5:
+            raise ValueError("Thought must contain at least 5 non-whitespace characters.")
         return v.strip()
+
+    @model_validator(mode="after")
+    def require_body_or_content(self) -> "ThoughtCreateRequest":
+        text = self.body or self.content
+        if not text or len(" ".join(text.strip().split())) < 5:
+            raise ValueError("Thought content must contain at least 5 non-whitespace characters.")
+        self.body = text.strip()
+        self.content = self.body
+        if not self.author_label or not self.author_label.strip():
+            self.author_label = "A quiet heart"
+        else:
+            self.author_label = self.author_label.strip()
+        return self
 
     @field_validator("accept_guidelines")
     @classmethod
@@ -56,19 +85,49 @@ class ThoughtCreateRequest(CamelModel):
 class PublicGentleWordItem(CamelModel):
     id: UUID
     thought_id: UUID = Field(alias="thoughtId")
+    author_label: str = Field(default="A kind stranger", alias="authorLabel")
     body: str
+    content: Optional[str] = None
     created_at: datetime = Field(alias="createdAt")
     approved_at: Optional[datetime] = Field(default=None, alias="approvedAt")
+
+    @model_validator(mode="after")
+    def sync_content(self) -> "PublicGentleWordItem":
+        if self.content is None:
+            self.content = self.body
+        return self
+
+
+class PublicGentleWordsListResponse(CamelModel):
+    data: List[PublicGentleWordItem]
+    items: List[PublicGentleWordItem]
+    total: int = 0
+    page: int = 1
+    page_size: int = Field(default=20, alias="pageSize")
 
 
 class PublicThoughtItem(CamelModel):
     id: UUID
+    author_label: str = Field(default="A quiet heart", alias="authorLabel")
     body: str
+    content: Optional[str] = None
     category: Optional[str] = None
+    tone: str = ThoughtTone.CREAM.value
+    status: str = ThoughtStatus.PUBLISHED.value
     created_at: datetime = Field(alias="createdAt")
     published_at: Optional[datetime] = Field(default=None, alias="publishedAt")
+    likes_count: int = Field(default=0, alias="likesCount")
     gentle_words_count: int = Field(default=0, alias="gentleWordsCount")
+    is_liked: bool = Field(default=False, alias="isLiked")
     acknowledgements: List[str] = Field(default_factory=list)
+    user_acknowledgements: List[str] = Field(default_factory=list, alias="userAcknowledgements")
+    acknowledgements_count: Dict[str, int] = Field(default_factory=dict, alias="acknowledgementsCount")
+
+    @model_validator(mode="after")
+    def sync_content(self) -> "PublicThoughtItem":
+        if self.content is None:
+            self.content = self.body
+        return self
 
 
 class PublicThoughtDetailItem(PublicThoughtItem):
@@ -78,69 +137,156 @@ class PublicThoughtDetailItem(PublicThoughtItem):
 
 class OwnThoughtItem(CamelModel):
     id: UUID
+    author_label: str = Field(default="A quiet heart", alias="authorLabel")
     body: str
+    content: Optional[str] = None
     category: Optional[str] = None
+    tone: str = ThoughtTone.CREAM.value
     status: str
     moderation_status: str = Field(alias="moderationStatus")
+    likes_count: int = Field(default=0, alias="likesCount")
     gentle_words_count: int = Field(default=0, alias="gentleWordsCount")
     created_at: datetime = Field(alias="createdAt")
     published_at: Optional[datetime] = Field(default=None, alias="publishedAt")
     support_resources: Optional[Dict[str, Any]] = Field(default=None, alias="supportResources")
 
+    @model_validator(mode="after")
+    def sync_content(self) -> "OwnThoughtItem":
+        if self.content is None:
+            self.content = self.body
+        return self
+
 
 class ThoughtFeedResponse(CamelModel):
     data: List[PublicThoughtItem]
+    items: List[PublicThoughtItem] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = Field(default=20, alias="pageSize")
     next_cursor: Optional[str] = Field(default=None, alias="nextCursor")
+
+    @model_validator(mode="after")
+    def sync_items(self) -> "ThoughtFeedResponse":
+        if not self.items and self.data:
+            self.items = self.data
+        return self
+
+
+class ThoughtLikeToggleResponse(CamelModel):
+    thought_id: UUID = Field(alias="thoughtId")
+    liked: bool
+    likes_count: int = Field(alias="likesCount")
 
 
 class OwnThoughtsResponse(CamelModel):
     data: List[OwnThoughtItem]
+    items: List[OwnThoughtItem] = Field(default_factory=list)
     next_cursor: Optional[str] = Field(default=None, alias="nextCursor")
+
+    @model_validator(mode="after")
+    def sync_items(self) -> "OwnThoughtsResponse":
+        if not self.items and self.data:
+            self.items = self.data
+        return self
 
 
 class GentleWordCreateRequest(CamelModel):
-    body: str = Field(..., min_length=5, max_length=1500)
+    body: Optional[str] = Field(default=None, max_length=1500)
+    content: Optional[str] = Field(default=None, max_length=1500)
+    author_label: Optional[str] = Field(default="A kind stranger", max_length=60, alias="authorLabel")
     idempotency_key: Optional[str] = Field(default=None, max_length=128, alias="idempotencyKey")
 
-    @field_validator("body")
+    @model_validator(mode="before")
     @classmethod
-    def validate_non_empty_body(cls, v: str) -> str:
-        stripped = " ".join(v.strip().split())
-        if len(stripped) < 5:
+    def normalize_content_or_body(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            raw = values.get("body") if values.get("body") is not None else values.get("content")
+            if raw is not None:
+                values["body"] = raw
+                values["content"] = raw
+        return values
+
+    @model_validator(mode="after")
+    def require_body_or_content(self) -> "GentleWordCreateRequest":
+        text = self.body or self.content
+        if not text or len(" ".join(text.strip().split())) < 5:
             raise ValueError("A Gentle Word must contain at least 5 non-whitespace characters.")
-        return v.strip()
+        self.body = text.strip()
+        self.content = self.body
+        if not self.author_label or not self.author_label.strip():
+            self.author_label = "A kind stranger"
+        else:
+            self.author_label = self.author_label.strip()
+        return self
 
 
 class GentleWordCreateItem(CamelModel):
     id: UUID
     thought_id: UUID = Field(alias="thoughtId")
+    author_label: str = Field(default="A kind stranger", alias="authorLabel")
     body: str
+    content: Optional[str] = None
     status: str
     created_at: datetime = Field(alias="createdAt")
+
+    @model_validator(mode="after")
+    def sync_content(self) -> "GentleWordCreateItem":
+        if self.content is None:
+            self.content = self.body
+        return self
 
 
 class OwnGentleWordItem(CamelModel):
     id: UUID
     thought_id: UUID = Field(alias="thoughtId")
+    author_label: str = Field(default="A kind stranger", alias="authorLabel")
     body: str
+    content: Optional[str] = None
     status: str
     points_awarded: int = Field(default=0, alias="pointsAwarded")
     created_at: datetime = Field(alias="createdAt")
     approved_at: Optional[datetime] = Field(default=None, alias="approvedAt")
 
+    @model_validator(mode="after")
+    def sync_content(self) -> "OwnGentleWordItem":
+        if self.content is None:
+            self.content = self.body
+        return self
+
 
 class OwnGentleWordsResponse(CamelModel):
     data: List[OwnGentleWordItem]
+    items: List[OwnGentleWordItem] = Field(default_factory=list)
     next_cursor: Optional[str] = Field(default=None, alias="nextCursor")
+
+    @model_validator(mode="after")
+    def sync_items(self) -> "OwnGentleWordsResponse":
+        if not self.items and self.data:
+            self.items = self.data
+        return self
 
 
 class AcknowledgementCreateRequest(CamelModel):
-    type: AcknowledgementType
+    type: Optional[AcknowledgementType] = None
+    acknowledgement_type: Optional[AcknowledgementType] = Field(default=None, alias="acknowledgementType")
+
+    @model_validator(mode="after")
+    def resolve_type(self) -> "AcknowledgementCreateRequest":
+        resolved = self.type or self.acknowledgement_type
+        if not resolved:
+            raise ValueError("Acknowledgement type is required.")
+        self.type = resolved
+        self.acknowledgement_type = resolved
+        return self
 
 
 class AcknowledgementResponseItem(CamelModel):
     thought_id: UUID = Field(alias="thoughtId")
+    type: Optional[str] = None
+    toggled: Optional[bool] = None
     acknowledgements: List[str]
+    user_acknowledgements: List[str] = Field(default_factory=list, alias="userAcknowledgements")
+    acknowledgements_count: Dict[str, int] = Field(default_factory=dict, alias="acknowledgementsCount")
 
 
 # --- Reports ---
@@ -149,6 +295,11 @@ class AcknowledgementResponseItem(CamelModel):
 class ContentReportCreateRequest(CamelModel):
     target_type: ReportTargetType = Field(alias="targetType")
     target_id: UUID = Field(alias="targetId")
+    reason: ReportReason
+    details: Optional[str] = Field(default=None, max_length=1000)
+
+
+class ThoughtReportCreateRequest(CamelModel):
     reason: ReportReason
     details: Optional[str] = Field(default=None, max_length=1000)
 
@@ -247,10 +398,15 @@ class ConsumeOrReleaseRedemptionRequest(CamelModel):
 class AdminThoughtQueueItem(CamelModel):
     id: UUID
     author_user_id: UUID = Field(alias="authorUserId")
+    author_label: str = Field(default="A quiet heart", alias="authorLabel")
     body: str
+    content: Optional[str] = None
     category: Optional[str] = None
+    tone: str = ThoughtTone.CREAM.value
     status: str
     moderation_status: str = Field(alias="moderationStatus")
+    likes_count: int = Field(default=0, alias="likesCount")
+    gentle_words_count: int = Field(default=0, alias="gentleWordsCount")
     is_urgent_flagged: bool = Field(alias="isUrgentFlagged")
     moderation_note: Optional[str] = Field(default=None, alias="moderationNote")
     moderated_by: Optional[UUID] = Field(default=None, alias="moderatedBy")
@@ -258,20 +414,43 @@ class AdminThoughtQueueItem(CamelModel):
     created_at: datetime = Field(alias="createdAt")
     published_at: Optional[datetime] = Field(default=None, alias="publishedAt")
 
+    @model_validator(mode="after")
+    def sync_content(self) -> "AdminThoughtQueueItem":
+        if self.content is None:
+            self.content = self.body
+        return self
+
 
 class AdminGentleWordQueueItem(CamelModel):
     id: UUID
     thought_id: UUID = Field(alias="thoughtId")
     thought_preview: Optional[str] = Field(default=None, alias="thoughtPreview")
     author_user_id: UUID = Field(alias="authorUserId")
+    author_label: str = Field(default="A kind stranger", alias="authorLabel")
     body: str
+    content: Optional[str] = None
     status: str
     points_awarded: int = Field(alias="pointsAwarded")
     moderation_note: Optional[str] = Field(default=None, alias="moderationNote")
+    rejection_reason: Optional[str] = Field(default=None, alias="rejectionReason")
     moderated_by: Optional[UUID] = Field(default=None, alias="moderatedBy")
+    reviewed_by: Optional[UUID] = Field(default=None, alias="reviewedBy")
     moderated_at: Optional[datetime] = Field(default=None, alias="moderatedAt")
+    reviewed_at: Optional[datetime] = Field(default=None, alias="reviewedAt")
     created_at: datetime = Field(alias="createdAt")
     approved_at: Optional[datetime] = Field(default=None, alias="approvedAt")
+
+    @model_validator(mode="after")
+    def sync_fields(self) -> "AdminGentleWordQueueItem":
+        if self.content is None:
+            self.content = self.body
+        if self.rejection_reason is None and self.status == GentleWordStatus.REJECTED.value:
+            self.rejection_reason = self.moderation_note
+        if self.reviewed_by is None:
+            self.reviewed_by = self.moderated_by
+        if self.reviewed_at is None:
+            self.reviewed_at = self.moderated_at
+        return self
 
 
 class AdminQueuePaginatedResponse(CamelModel, Generic[T]):
@@ -282,6 +461,13 @@ class AdminQueuePaginatedResponse(CamelModel, Generic[T]):
 class ModerationDecisionRequest(CamelModel):
     note: Optional[str] = Field(default=None, max_length=1000)
     reason: Optional[str] = Field(default=None, max_length=1000)
+    rejection_reason: Optional[str] = Field(default=None, max_length=1000, alias="rejectionReason")
+
+    @model_validator(mode="after")
+    def sync_reason(self) -> "ModerationDecisionRequest":
+        if self.reason is None and self.rejection_reason is not None:
+            self.reason = self.rejection_reason
+        return self
 
 
 class HideContentRequest(CamelModel):

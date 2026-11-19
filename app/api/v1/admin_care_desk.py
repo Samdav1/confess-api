@@ -70,7 +70,7 @@ async def list_care_desk_thoughts(
     summary="[Care Desk] List Gentle Words moderation queue",
 )
 async def list_care_desk_gentle_words(
-    status: Optional[GentleWordStatus] = Query(default=GentleWordStatus.PENDING),
+    status: Optional[GentleWordStatus] = Query(default=GentleWordStatus.PENDING_REVIEW),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=100),
     current_admin: Admin = Depends(get_current_admin),
@@ -93,6 +93,16 @@ async def list_care_desk_gentle_words(
     response_model=DataResponse[AdminThoughtQueueItem],
     summary="[Care Desk] Approve and publish a Thought",
 )
+@router.patch(
+    "/care-desk/thoughts/{thought_id}/approve",
+    response_model=DataResponse[AdminThoughtQueueItem],
+    summary="[Care Desk] Approve and publish a Thought",
+)
+@router.post(
+    "/care-desk/thoughts/{thought_id}/approve",
+    response_model=DataResponse[AdminThoughtQueueItem],
+    summary="[Care Desk] Approve and publish a Thought",
+)
 async def approve_thought(
     thought_id: UUID,
     request: Optional[ModerationDecisionRequest] = Body(default=None),
@@ -110,6 +120,16 @@ async def approve_thought(
 
 @router.post(
     "/thoughts/{thought_id}/reject",
+    response_model=DataResponse[AdminThoughtQueueItem],
+    summary="[Care Desk] Reject a Thought",
+)
+@router.patch(
+    "/care-desk/thoughts/{thought_id}/reject",
+    response_model=DataResponse[AdminThoughtQueueItem],
+    summary="[Care Desk] Reject a Thought",
+)
+@router.post(
+    "/care-desk/thoughts/{thought_id}/reject",
     response_model=DataResponse[AdminThoughtQueueItem],
     summary="[Care Desk] Reject a Thought",
 )
@@ -134,6 +154,16 @@ async def reject_thought(
     response_model=DataResponse[AdminGentleWordQueueItem],
     summary="[Care Desk] Approve Gentle Word and award Kindness Points atomically",
 )
+@router.patch(
+    "/care-desk/gentle-words/{gentle_word_id}/approve",
+    response_model=DataResponse[AdminGentleWordQueueItem],
+    summary="[Care Desk] Approve Gentle Word and award Kindness Points atomically",
+)
+@router.post(
+    "/care-desk/gentle-words/{gentle_word_id}/approve",
+    response_model=DataResponse[AdminGentleWordQueueItem],
+    summary="[Care Desk] Approve Gentle Word and award Kindness Points atomically",
+)
 async def approve_gentle_word(
     gentle_word_id: UUID,
     request: Optional[ModerationDecisionRequest] = Body(default=None),
@@ -151,6 +181,16 @@ async def approve_gentle_word(
 
 @router.post(
     "/gentle-words/{gentle_word_id}/reject",
+    response_model=DataResponse[AdminGentleWordQueueItem],
+    summary="[Care Desk] Reject Gentle Word (awards 0 points)",
+)
+@router.patch(
+    "/care-desk/gentle-words/{gentle_word_id}/reject",
+    response_model=DataResponse[AdminGentleWordQueueItem],
+    summary="[Care Desk] Reject Gentle Word (awards 0 points)",
+)
+@router.post(
+    "/care-desk/gentle-words/{gentle_word_id}/reject",
     response_model=DataResponse[AdminGentleWordQueueItem],
     summary="[Care Desk] Reject Gentle Word (awards 0 points)",
 )

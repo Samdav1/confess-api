@@ -20,6 +20,7 @@ from app.models.listening_room import (
     PerkRedemption,
     Thought,
     ThoughtAcknowledgement,
+    ThoughtLike,
     UserKindnessBalance,
 )
 
@@ -31,6 +32,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 _LISTENING_ROOM_TABLES = [
     Thought.__table__,
+    ThoughtLike.__table__,
     GentleWord.__table__,
     ThoughtAcknowledgement.__table__,
     KindnessPointsPolicy.__table__,

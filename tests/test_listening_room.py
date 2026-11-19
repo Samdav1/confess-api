@@ -12,6 +12,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.models.admin import Admin
 from app.models.celebration import CelebrationPage, DeliveryMethod, MusicType, OccasionType, PaymentStatus
 from app.models.listening_room import (
+    AcknowledgementType,
     DiscountType,
     GentleWordStatus,
     KindnessPointsLedger,
@@ -20,6 +21,7 @@ from app.models.listening_room import (
     RedemptionStatus,
     ThoughtCategory,
     ThoughtStatus,
+    ThoughtTone,
     UserKindnessBalance,
 )
 from app.models.user import User
@@ -113,8 +115,20 @@ def test_input_sanitization_and_crisis_detection():
     with pytest.raises(ValueError):
         ThoughtCreateRequest(body="This is a valid thought message", acceptGuidelines=False)
 
-    req = GentleWordCreateRequest(body="  Sending warmth to you!  ")
+    req = GentleWordCreateRequest(content="  Sending warmth to you!  ", authorLabel="Night wanderer")
     assert req.body == "Sending warmth to you!"
+    assert req.content == "Sending warmth to you!"
+    assert req.author_label == "Night wanderer"
+
+    t_req = ThoughtCreateRequest(
+        content="Writing late at night.",
+        category=ThoughtCategory.LATE_NIGHT_THOUGHT,
+        tone=ThoughtTone.MAUVE,
+        authorLabel="Quiet listener",
+    )
+    assert t_req.body == "Writing late at night."
+    assert t_req.tone == ThoughtTone.MAUVE
+    assert t_req.author_label == "Quiet listener"
 
 
 def test_discount_math_and_cursors():
@@ -222,17 +236,31 @@ async def test_listening_room_end_to_end_workflow():
         assert len(feed) == 1
         assert feed[0]["id"] == created_t["id"]
 
-        # 3. Helper leaves A Gentle Word -> pending (not visible in public detail)
+        # 3. Helper leaves A Gentle Word -> pending_review (not visible in public detail)
         gw = await svc.submit_gentle_word(
             session=session,
             user_id=helper.id,
             thought_id=created_t["id"],
             body="You are doing your best, and it is okay to take one step at a time.",
             idempotency_key="gw-req-1",
+            author_label="Night wanderer",
         )
-        assert gw["status"] == GentleWordStatus.PENDING.value
-        detail = await svc.get_thought_detail(session, created_t["id"])
+        assert gw["status"] == GentleWordStatus.PENDING_REVIEW.value
+        detail = await svc.get_thought_detail(session, created_t["id"], user_id=helper.id)
         assert len(detail["gentle_words"]) == 0
+
+        # Toggle likes and acknowledgements
+        like_on = await svc.toggle_thought_like(session, helper.id, created_t["id"])
+        assert like_on["liked"] is True and like_on["likes_count"] == 1
+        like_off = await svc.toggle_thought_like(session, helper.id, created_t["id"])
+        assert like_off["liked"] is False and like_off["likes_count"] == 0
+
+        ack_on = await svc.toggle_acknowledgement(session, helper.id, created_t["id"], AcknowledgementType.I_HEAR_YOU)
+        assert ack_on["toggled"] is True
+        assert "i_hear_you" in ack_on["user_acknowledgements"]
+        ack_off = await svc.toggle_acknowledgement(session, helper.id, created_t["id"], AcknowledgementType.I_HEAR_YOU)
+        assert ack_off["toggled"] is False
+        assert "i_hear_you" not in ack_off["user_acknowledgements"]
 
         # Self-reply earns 0 points
         self_gw = await svc.submit_gentle_word(
