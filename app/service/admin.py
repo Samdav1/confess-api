@@ -274,3 +274,87 @@ async def get_financial_analysis_admin(db: AsyncSession) -> Dict[str, Any]:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch financial analysis: {str(e)}"
         )
+
+
+async def get_all_payments_admin(
+    db: AsyncSession,
+    skip: int = 0,
+    limit: int = 100,
+    payment_status: str | None = None,
+) -> Dict[str, Any]:
+    filters = []
+    if payment_status:
+        filters.append(Payment.status == payment_status)
+
+    total = await db.execute(select(func.count(Payment.id)).where(*filters))
+    statement = (
+        select(Payment)
+        .where(*filters)
+        .order_by(Payment.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    result = await db.execute(statement)
+    return {"total": total.scalar() or 0, "items": result.scalars().all()}
+
+
+async def update_payment_record_admin(
+    db: AsyncSession,
+    admin_id,
+    payment_id,
+    new_status: str,
+    amount: float | None = None,
+    channel: str | None = None,
+    paid_at: datetime | None = None,
+    reason: str | None = None,
+) -> Payment:
+    from app.models.listening_room import ModerationAuditLog
+
+    stmt = select(Payment).where(Payment.id == payment_id).with_for_update()
+    result = await db.execute(stmt)
+    payment = result.scalar_one_or_none()
+    if not payment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Financial record not found",
+        )
+
+    now = datetime.now(timezone.utc)
+    previous_status = payment.status
+    previous_amount = payment.amount
+
+    payment.status = new_status
+    if amount is not None:
+        payment.amount = amount
+    if channel is not None:
+        payment.channel = channel
+
+    if paid_at is not None:
+        payment.paid_at = paid_at if paid_at.tzinfo else paid_at.replace(tzinfo=timezone.utc)
+    elif new_status == "success" and payment.paid_at is None:
+        payment.paid_at = now
+    elif new_status in ("pending", "failed", "abandoned"):
+        payment.paid_at = None
+
+    payment.updated_at = now
+    db.add(payment)
+
+    audit_log = ModerationAuditLog(
+        admin_user_id=admin_id,
+        action="payment_record_update",
+        target_type="payment",
+        target_id=payment.id,
+        previous_status=previous_status,
+        new_status=new_status,
+        reason=reason,
+        metadata_={
+            "reference": payment.reference,
+            "previous_amount": previous_amount,
+            "new_amount": payment.amount,
+            "channel": payment.channel,
+        },
+    )
+    db.add(audit_log)
+    await db.commit()
+    await db.refresh(payment)
+    return payment

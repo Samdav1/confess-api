@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlmodel.ext.asyncio.session import AsyncSession
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from uuid import UUID
 
 from app.db.sessions import get_session
 from app.dependencies.auth import get_current_admin
@@ -13,6 +14,10 @@ from app.schemas.admin import (
     AdminLoginResponse,
     DashboardStatsResponse,
     FinancialAnalysisResponse,
+    AdminPaymentStatus,
+    AdminPaymentUpdateRequest,
+    AdminPaymentRecordResponse,
+    PaginatedPaymentsResponse,
     PaginatedUsersResponse,
     PaginatedConfessFormsResponse,
     PaginatedAnonymousLinksResponse,
@@ -24,6 +29,8 @@ from app.service.admin import (
     reset_admin_password,
     get_dashboard_metrics,
     get_financial_analysis_admin,
+    get_all_payments_admin,
+    update_payment_record_admin,
     get_all_users_admin,
     get_all_confess_forms_admin,
     get_all_anonymous_links_admin,
@@ -91,6 +98,46 @@ async def financial_analysis(
     """
     data = await get_financial_analysis_admin(db=db)
     return FinancialAnalysisResponse(**data)
+
+@router.get("/financial-records", response_model=PaginatedPaymentsResponse, summary="[Admin] List financial records by status")
+async def list_financial_records(
+    status: Optional[AdminPaymentStatus] = Query(default=None, description="Filter by payment status"),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    current_admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_session)
+):
+    """List paginated financial (payment) records with optional status filter."""
+    return await get_all_payments_admin(
+        db=db,
+        skip=skip,
+        limit=limit,
+        payment_status=status.value if status else None,
+    )
+
+@router.patch("/financial-records/{payment_id}", response_model=AdminPaymentRecordResponse, summary="[Admin] Update financial record status")
+@router.put("/financial-records/{payment_id}", response_model=AdminPaymentRecordResponse, summary="[Admin] Update financial record status")
+async def update_financial_record(
+    payment_id: UUID,
+    request: AdminPaymentUpdateRequest,
+    current_admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_session)
+):
+    """
+    Update a financial record's status (pending, success, failed, abandoned, reversed, refunded)
+    and optionally amount, channel, or paid_at, with an audit log entry.
+    """
+    payment = await update_payment_record_admin(
+        db=db,
+        admin_id=current_admin.id,
+        payment_id=payment_id,
+        new_status=request.status.value,
+        amount=request.amount,
+        channel=request.channel,
+        paid_at=request.paid_at,
+        reason=request.reason,
+    )
+    return AdminPaymentRecordResponse.model_validate(payment)
 
 @router.get("/users", response_model=PaginatedUsersResponse, summary="[Admin] Get paginated users")
 async def get_users(

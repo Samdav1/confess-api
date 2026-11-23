@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 from datetime import datetime
+from enum import Enum
 from uuid import UUID
 
 from typing import List
@@ -76,6 +77,40 @@ class FinancialAnalysisResponse(BaseModel):
     revenue_this_month: float
     services_breakdown: List[ServiceFinancialBreakdown]
     recent_transactions: List[RecentTransactionSummary]
+
+class AdminPaymentStatus(str, Enum):
+    PENDING = "pending"
+    SUCCESS = "success"
+    FAILED = "failed"
+    ABANDONED = "abandoned"
+    REVERSED = "reversed"
+    REFUNDED = "refunded"
+
+class AdminPaymentUpdateRequest(BaseModel):
+    status: AdminPaymentStatus
+    amount: Optional[float] = Field(default=None, gt=0)
+    channel: Optional[str] = Field(default=None, max_length=64)
+    paid_at: Optional[datetime] = None
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+class AdminPaymentRecordResponse(BaseModel):
+    id: UUID
+    user_id: UUID
+    reference: str
+    amount: float
+    currency: str
+    status: str
+    channel: Optional[str] = None
+    paid_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class PaginatedPaymentsResponse(BaseModel):
+    total: int
+    items: List[AdminPaymentRecordResponse]
 
 class PaginatedUsersResponse(BaseModel):
     total: int
